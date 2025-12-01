@@ -457,7 +457,10 @@ def safely_merge(dfs: Dict[str, pd.DataFrame], key: str, how: str = "outer") -> 
 
 def show_basic_eda(df: pd.DataFrame):
     st.markdown("### 📊 Descriptive Statistics")
-    st.write(df.describe(include=[np.number]).T)
+    if df.select_dtypes(include=[np.number]).shape[1] > 0:
+        st.write(df.describe(include=[np.number]).T)
+    else:
+        st.write("No numeric variables for descriptive statistics.")
 
     st.markdown("### 📋 Categorical Frequencies (Top 10)")
     cat_cols = df.select_dtypes(include=["object", "category"]).columns
@@ -476,13 +479,61 @@ def show_basic_eda(df: pd.DataFrame):
     else:
         st.write("Not enough numeric variables for correlation heatmap.")
 
-    st.markdown("### 📈 Simple Plots")
+    st.markdown("### 📈 Simple Histogram")
     num_cols = list(num_df.columns)
     if num_cols:
         col_to_plot = st.selectbox("Select numeric variable for histogram", num_cols)
         st.bar_chart(num_df[col_to_plot].dropna().value_counts().sort_index())
     else:
         st.write("No numeric columns available for plotting.")
+
+
+def generate_narrative_from_eda(df: pd.DataFrame, title: str = "EDA summary") -> str:
+    """Generate a simple narrative text based on numeric and categorical distributions."""
+    numeric_cols = list(df.select_dtypes(include=[np.number]).columns)
+    cat_cols = list(df.select_dtypes(include=["object", "category"]).columns)
+
+    lines = [f"**Narrative summary – {title}**"]
+    lines.append(
+        f"- The dataset used for EDA contains **{df.shape[0]} observations** and **{df.shape[1]} variables**."
+    )
+    lines.append(
+        f"- Of these, **{len(numeric_cols)} numeric** variables and **{len(cat_cols)} categorical** variables were included in the analysis."
+    )
+
+    if numeric_cols:
+        lines.append("")
+        lines.append("**Numeric variables – central tendency and spread**")
+        desc = df[numeric_cols].describe().T
+        for col in numeric_cols[:5]:  # summarize up to 5 numeric variables
+            if col in desc.index:
+                row = desc.loc[col]
+                lines.append(
+                    f"- `{col}` has a mean of **{row['mean']:.2f}**, "
+                    f"ranging approximately from **{row['min']:.2f}** to **{row['max']:.2f}**."
+                )
+
+    if cat_cols:
+        lines.append("")
+        lines.append("**Categorical variables – dominant categories**")
+        for col in cat_cols[:5]:
+            vc = df[col].value_counts(dropna=True)
+            if not vc.empty:
+                top_cat = vc.index[0]
+                top_count = int(vc.iloc[0])
+                top_pct = (top_count / len(df) * 100) if len(df) > 0 else 0
+                lines.append(
+                    f"- In `{col}`, the most frequent category is **{top_cat}** "
+                    f"({top_count} records, ~{top_pct:.1f}% of observations)."
+                )
+
+    lines.append("")
+    lines.append(
+        "Overall, these patterns provide a starting point for deeper inferential analysis, "
+        "segmentation, or model-building, depending on the project objectives."
+    )
+
+    return "\n".join(lines)
 
 
 # =========================================
@@ -497,17 +548,17 @@ st.write(
     """
 This agent ingests multiple datasets (CSV, Excel, Stata, SPSS, JSON, pickle), 
 detects schema similarities, diagnoses data-quality issues, supports append/merge 
-integration, and prepares clean, analysis-ready data with basic EDA and optional 
+integration, and prepares clean, analysis-ready data with EDA and optional 
 ML-based anomaly detection.
 """
 )
 
 # --- Sidebar options ---
-st.sidebar.header("Options")
+st.sidebar.header("Data & Options")
 
 use_synthetic = st.sidebar.checkbox("Use synthetic example dataset", value=False)
 
-uploaded_files = st.file_uploader(
+uploaded_files = st.sidebar.file_uploader(
     "Upload one or more datasets",
     accept_multiple_files=True,
     type=["csv", "xlsx", "xls", "dta", "sav", "json", "pkl", "pickle", "tsv", "txt"],
@@ -527,7 +578,7 @@ if uploaded_files:
             st.error(f"❌ Could not read file `{uf.name}`: {e}")
 
 if not dfs_raw:
-    st.info("Upload files and/or enable synthetic data to begin.")
+    st.info("Use the sidebar to upload files and/or enable synthetic data to begin.")
     st.stop()
 
 st.subheader("1️⃣ Preview of Uploaded Datasets")
@@ -560,18 +611,22 @@ harmonization_mappings: Dict[str, Dict[str, str]] = {fname: {} for fname in dfs_
 suggestions = suggest_similar_columns(dfs_norm)
 if suggestions:
     st.write(
-        "The agent detected potentially similar variables across datasets. "
-        "Tick the ones that should be treated as the same variable."
+        "The agent suggests that some variables are likely the **same concept** across datasets.\n"
+        "By default, they will be harmonized to a common name. "
+        "✅ **Check the box only if they are actually unrelated and should NOT be harmonized.**"
     )
 
-    # Use index-based unique keys to avoid duplicate widget keys
+    # For each suggestion, we harmonize unless the user marks it as unrelated
     for idx, (f1, c1, c2) in enumerate(suggestions):
-        label = f"Treat `{c1}` in **{f1}** and `{c2}` in the other file as the same variable?"
-        if st.checkbox(label, key=f"suggest_{idx}"):
+        st.markdown(f"- Suggested match: `{c1}` in **{f1}** ↔ `{c2}` in another file")
+        not_related = st.checkbox(
+            "These are unrelated – keep them separate",
+            key=f"suggest_unrelated_{idx}",
+        )
+        if not not_related:
             base = c1  # choose the first as canonical
             # Map both columns to same base name
             harmonization_mappings[f1][c1] = base
-            # Find which file the second col belongs to
             for fname, df in dfs_norm.items():
                 if c2 in df.columns:
                     harmonization_mappings[fname][c2] = base
@@ -647,47 +702,57 @@ if integrated_df.empty:
 # 5️⃣ Data-quality assessment & cleaning
 # =========================================
 
-st.subheader("5️⃣ Data-Quality Assessment")
+st.subheader("5️⃣ Data-Quality Assessment – BEFORE Cleaning")
 
-with st.expander("Missing values summary", expanded=True):
-    miss_df = detect_missingness(integrated_df)
-    st.dataframe(miss_df)
+# Before-cleaning diagnostics
+miss_before = detect_missingness(integrated_df)
+ext_before = detect_numeric_extremes(integrated_df)
+logical_msgs_before = detect_logical_inconsistencies(integrated_df)
 
-with st.expander("Numeric extremes & impossible values", expanded=True):
-    ext_df = detect_numeric_extremes(integrated_df)
-    st.dataframe(ext_df)
+with st.expander("Missing values summary (before cleaning)", expanded=True):
+    st.dataframe(miss_before)
 
-# Duplicates
-with st.expander("Duplicate IDs", expanded=False):
+with st.expander("Numeric extremes & impossible values (before cleaning)", expanded=True):
+    st.dataframe(ext_before)
+
+with st.expander("Duplicate IDs (before cleaning)", expanded=False):
     candidate_ids = [c for c in integrated_df.columns if "id" in c.lower()]
     if candidate_ids:
         chosen_ids = st.multiselect(
             "Select ID columns to check for duplicates", candidate_ids, default=candidate_ids
         )
-        dup_info = detect_duplicates(integrated_df, chosen_ids)
-        if dup_info:
-            st.write(dup_info)
+        dup_info_before = detect_duplicates(integrated_df, chosen_ids)
+        if dup_info_before:
+            st.write(dup_info_before)
         else:
             st.write("No duplicates detected for selected ID columns.")
     else:
         st.write("No ID-like columns found for duplicate checks.")
 
-# Logical inconsistencies
-with st.expander("Logical inconsistencies", expanded=False):
-    msgs = detect_logical_inconsistencies(integrated_df)
-    if msgs:
-        for m in msgs:
+with st.expander("Logical inconsistencies (before cleaning)", expanded=False):
+    if logical_msgs_before:
+        for m in logical_msgs_before:
             st.warning(m)
     else:
         st.write("No simple logical inconsistencies detected by current rules.")
 
 st.markdown(
-    "Detected potential issues above. You can choose to run an **automatic cleaning pass** or manually export and fix."
+    """
+**Summary:** These are the potential data-cleaning issues detected (missing data, outliers, duplicates, inconsistencies).  
+Now choose whether you want the agent to apply automatic corrections or keep everything manual.
+"""
 )
 
-auto_clean = st.checkbox("Apply automatic cleaning (convert numerics, cap ages, trim extremes)")
+cleaning_mode = st.radio(
+    "Choose data-cleaning mode",
+    [
+        "Manual review only (no automatic fixes)",
+        "Automatic cleaning (apply suggested fixes such as numeric conversion, capping, etc.)",
+    ],
+)
 
-if auto_clean:
+# Apply cleaning based on mode
+if cleaning_mode.startswith("Automatic"):
     df_clean = integrated_df.copy()
 
     # Convert numeric-like object columns
@@ -717,12 +782,36 @@ if auto_clean:
 else:
     cleaned_df = integrated_df
 
-st.subheader("6️⃣ Cleaned / Integrated Dataset Preview")
+st.subheader("6️⃣ Data-quality Assessment – AFTER Cleaning")
+
+miss_after = detect_missingness(cleaned_df)
+ext_after = detect_numeric_extremes(cleaned_df)
+logical_msgs_after = detect_logical_inconsistencies(cleaned_df)
+
+col1, col2 = st.columns(2)
+with col1:
+    st.markdown("**Missing values – before cleaning**")
+    st.dataframe(miss_before)
+with col2:
+    st.markdown("**Missing values – after cleaning**")
+    st.dataframe(miss_after)
+
+st.markdown("**Numeric extremes & impossible values – after cleaning**")
+st.dataframe(ext_after)
+
+with st.expander("Logical inconsistencies – after cleaning", expanded=False):
+    if logical_msgs_after:
+        for m in logical_msgs_after:
+            st.warning(m)
+    else:
+        st.write("No simple logical inconsistencies detected after cleaning rules.")
+
+st.subheader("7️⃣ Cleaned / Integrated Dataset Preview")
 st.dataframe(cleaned_df.head(100))
 st.write("Shape:", cleaned_df.shape)
 
 # Download
-st.subheader("7️⃣ Download Cleaned Dataset")
+st.subheader("8️⃣ Download Cleaned Dataset")
 csv_bytes = cleaned_df.to_csv(index=False).encode("utf-8")
 st.download_button(
     label="⬇️ Download cleaned data as CSV",
@@ -732,10 +821,10 @@ st.download_button(
 )
 
 # =========================================
-# 8️⃣ Optional ML-based anomaly detection
+# 9️⃣ Optional ML-based anomaly detection
 # =========================================
 
-st.subheader("8️⃣ Optional: ML-based Anomaly Detection")
+st.subheader("9️⃣ Optional: ML-based Anomaly Detection")
 
 run_ml = st.checkbox("Run Isolation Forest anomaly detection on numeric variables")
 
@@ -749,14 +838,60 @@ if run_ml:
         st.write("No anomalies flagged (or model not run).")
 
 # =========================================
-# 9️⃣ Exploratory Data Analysis (EDA)
+# 🔟 Exploratory Data Analysis (EDA)
 # =========================================
 
-st.subheader("9️⃣ Exploratory Data Analysis (EDA)")
-show_basic_eda(cleaned_df)
+st.subheader("🔟 Exploratory Data Analysis (EDA)")
+
+numeric_cols_all = list(cleaned_df.select_dtypes(include=[np.number]).columns)
+cat_cols_all = list(cleaned_df.select_dtypes(include=["object", "category"]).columns)
+
+if not numeric_cols_all and not cat_cols_all:
+    st.write("No numeric or categorical variables available for EDA.")
+else:
+    analysis_scope = st.radio(
+        "Variables for analysis",
+        [
+            "All numeric & categorical variables",
+            "Select variables manually",
+        ],
+    )
+
+    if analysis_scope.startswith("Select"):
+        st.markdown("**Select numeric variables (if any)**")
+        numeric_selected = st.multiselect(
+            "Numeric variables",
+            options=numeric_cols_all,
+            default=numeric_cols_all,
+        )
+
+        st.markdown("**Select categorical variables (if any)**")
+        cat_selected = st.multiselect(
+            "Categorical variables",
+            options=cat_cols_all,
+            default=cat_cols_all,
+        )
+    else:
+        numeric_selected = numeric_cols_all
+        cat_selected = cat_cols_all
+
+    selected_cols = list(dict.fromkeys(numeric_selected + cat_selected))
+    if not selected_cols:
+        st.info("No variables selected for EDA.")
+    else:
+        df_for_eda = cleaned_df[selected_cols].copy()
+
+        tab_results, tab_narrative = st.tabs(["📊 EDA Results", "📝 Narrative summary"])
+
+        with tab_results:
+            show_basic_eda(df_for_eda)
+
+        with tab_narrative:
+            narrative = generate_narrative_from_eda(df_for_eda, title="selected variables")
+            st.markdown(narrative)
 
 st.markdown("---")
 st.caption(
     "All cleaning steps are transparent and reproducible. "
-    "Please review flagged issues before making final analytical decisions."
+    "Please review flagged issues and narratives before making final analytical decisions."
 )
