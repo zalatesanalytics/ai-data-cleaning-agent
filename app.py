@@ -328,12 +328,13 @@ def detect_logical_inconsistencies(df: pd.DataFrame) -> List[str]:
         ]
 
         higher_mask = edu_series.str.contains("|".join(higher_terms), na=False)
-        young_mask = age_series < 15
+        # focus on adolescent band 12–17 for corrections
+        young_mask = (age_series >= 12) & (age_series <= 17)
 
         count = int((young_mask & higher_mask).sum())
         if count > 0:
             messages.append(
-                f"{count} records: age < 15 but education suggests higher/tertiary level "
+                f"{count} records: age 12–17 but education suggests higher/tertiary level "
                 f"(column '{edu_col}')."
             )
 
@@ -364,6 +365,87 @@ def detect_logical_inconsistencies(df: pd.DataFrame) -> List[str]:
             )
 
     return messages
+
+
+def auto_fix_age_education_inconsistencies(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Fix cases where age is in 12–17 band but education is unrealistically high.
+    We reassign education to the most common realistic level observed in that age band.
+    """
+    df = df.copy()
+
+    # Find age column
+    age_col = None
+    age_series = None
+    for c in df.columns:
+        if "age" in c.lower():
+            s = pd.to_numeric(df[c], errors="coerce")
+            if s.notna().sum() > 0:
+                age_col = c
+                age_series = s
+                break
+
+    # Find education column
+    edu_col = None
+    edu_keywords = ["educ", "school", "grade", "class", "level"]
+    for c in df.columns:
+        name = c.lower()
+        if any(k in name for k in edu_keywords):
+            edu_col = c
+            break
+
+    if age_col is None or edu_col is None:
+        return df  # nothing to fix
+
+    edu_series = df[edu_col].astype(str)
+
+    # Define adolescent band and "higher" education markers
+    band_mask = (age_series >= 12) & (age_series <= 17)
+    higher_terms = [
+        "university",
+        "college",
+        "bachelor",
+        "master",
+        "phd",
+        "higher",
+        "diploma",
+        "degree",
+    ]
+    higher_mask = edu_series.str.lower().str.contains("|".join(higher_terms), na=False)
+
+    inconsistent_mask = band_mask & higher_mask
+
+    if inconsistent_mask.sum() == 0:
+        return df
+
+    # Normal (non-inconsistent) adolescents for reference
+    normal_band_mask = band_mask & ~inconsistent_mask
+    if normal_band_mask.sum() > 0:
+        # Use mode of education among 12–17 non-inconsistent cases
+        mode_vals = edu_series[normal_band_mask].mode()
+        if len(mode_vals) > 0:
+            replacement = mode_vals.iloc[0]
+        else:
+            replacement = "Secondary"
+    else:
+        # Fallback if no normal records exist in the band
+        replacement = "Secondary"
+
+    df.loc[inconsistent_mask, edu_col] = replacement
+    return df
+
+
+def auto_impute_numeric_missing(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Impute missing numeric values using the column median (robust default).
+    """
+    df = df.copy()
+    numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+    for col in numeric_cols:
+        if df[col].isna().any():
+            median_val = df[col].median()
+            df[col] = df[col].fillna(median_val)
+    return df
 
 
 # =========================================
@@ -414,7 +496,14 @@ def harmonize_columns(
 
 
 def safely_append(dfs: Dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """Vertically append multiple DataFrames with safety checks."""
+    """
+    Vertically append multiple DataFrames with safety checks.
+
+    When column names are harmonized (e.g., 'educ' and 'education_head'
+    mapped to the same standard name), rows from different datasets
+    will be appended under that common column, while unique columns
+    from each dataset are preserved.
+    """
     cleaned = []
     for df in dfs.values():
         df = basic_cleaning(df)
@@ -612,7 +701,7 @@ suggestions = suggest_similar_columns(dfs_norm)
 if suggestions:
     st.write(
         "The agent suggests that some variables are likely the **same concept** across datasets.\n"
-        "By default, they will be harmonized to a common name. "
+        "By default, they will be harmonized to a common name and then appended as a single column.\n"
         "✅ **Check the box only if they are actually unrelated and should NOT be harmonized.**"
     )
 
@@ -624,7 +713,7 @@ if suggestions:
             key=f"suggest_unrelated_{idx}",
         )
         if not not_related:
-            base = c1  # choose the first as canonical
+            base = c1  # choose the first as canonical name
             # Map both columns to same base name
             harmonization_mappings[f1][c1] = base
             for fname, df in dfs_norm.items():
@@ -747,7 +836,7 @@ cleaning_mode = st.radio(
     "Choose data-cleaning mode",
     [
         "Manual review only (no automatic fixes)",
-        "Automatic cleaning (apply suggested fixes such as numeric conversion, capping, etc.)",
+        "Automatic cleaning (impute numeric missing, cap extremes, and fix age–education inconsistencies)",
     ],
 )
 
@@ -778,6 +867,12 @@ if cleaning_mode.startswith("Automatic"):
         ):
             df_clean[col] = df_clean[col].clip(lower=0, upper=1_000_000)
 
+    # Impute numeric missing values (median)
+    df_clean = auto_impute_numeric_missing(df_clean)
+
+    # Auto-fix age–education inconsistencies in the adolescent band
+    df_clean = auto_fix_age_education_inconsistencies(df_clean)
+
     cleaned_df = df_clean
 else:
     cleaned_df = integrated_df
@@ -793,7 +888,7 @@ with col1:
     st.markdown("**Missing values – before cleaning**")
     st.dataframe(miss_before)
 with col2:
-    st.markdown("**Missing values – after cleaning**")
+    st.markdown("**Missing values – after cleaning (with imputation, if enabled)**")
     st.dataframe(miss_after)
 
 st.markdown("**Numeric extremes & impossible values – after cleaning**")
