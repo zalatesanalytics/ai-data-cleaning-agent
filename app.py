@@ -1,19 +1,6 @@
 """
 Zalates Analytics – AI Data Cleaning & Integration Agent
-
-Core Responsibilities
-- Ingest multiple datasets (CSV, Excel, Stata, SPSS, JSON, pickle).
-- Detect and correct inconsistencies across numeric, categorical, and datetime variables.
-- Harmonize semantically similar variables across datasets (e.g., inc, income1, income2, household_income).
-- Support multi-dataset merging or appending.
-- Perform automatic cleaning by default, but keep the user in full control.
-
-Behavior
-- Automatic integration + cleaning is the default path.
-- After cleaning, the agent shows BEFORE vs AFTER diagnostics.
-- Then it asks the user if they are satisfied with the automatic cleaning.
-  - If YES → the cleaned dataset is used for EDA and download.
-  - If NO → the integrated but uncleaned dataset is used (manual cleaning mode).
+(Readable theme + separate pages for EDA, Visualizations, and Slicer dashboards)
 """
 
 import os
@@ -656,31 +643,6 @@ def safely_merge(dfs: Dict[str, pd.DataFrame], key: str, how: str = "outer") -> 
 # 8. EDA helpers
 # =========================================
 
-def show_basic_eda(df: pd.DataFrame):
-    st.markdown("### 📊 Descriptive Statistics")
-    if df.select_dtypes(include=[np.number]).shape[1] > 0:
-        st.write(df.describe(include=[np.number]).T)
-    else:
-        st.write("No numeric variables for descriptive statistics.")
-
-    st.markdown("### 📋 Categorical Frequencies (Top 10)")
-    cat_cols = df.select_dtypes(include=["object", "category"]).columns
-    if len(cat_cols) == 0:
-        st.write("No categorical columns detected.")
-    else:
-        for col in cat_cols:
-            with st.expander(f"Variable: {col}", expanded=False):
-                st.write(df[col].value_counts(dropna=False).head(10))
-
-    st.markdown("### 🔗 Correlation Heatmap (numeric)")
-    num_df = df.select_dtypes(include=[np.number])
-    if num_df.shape[1] > 1:
-        corr = num_df.corr()
-        st.dataframe(corr.style.background_gradient(cmap="coolwarm"))
-    else:
-        st.write("Not enough numeric variables for correlation heatmap.")
-
-
 def generate_narrative_from_eda(df: pd.DataFrame, title: str = "EDA summary") -> str:
     """Generate a simple narrative text based on numeric and categorical distributions."""
     numeric_cols = list(df.select_dtypes(include=[np.number]).columns)
@@ -738,17 +700,31 @@ st.set_page_config(
     layout="wide",
 )
 
-# Zalates gradient background + padding
+# Light background, dark text; gradient header only
 st.markdown(
     """
     <style>
     .stApp {
-        background: linear-gradient(135deg, #1c1f4a 0%, #5e2b83 45%, #09a4b4 100%);
-        color: #f5f5f5;
+        background-color: #f5f7fb;
+        color: #222222;
     }
     .block-container {
         padding-top: 1rem;
         padding-bottom: 2rem;
+    }
+    [data-testid="stSidebar"] {
+        background: #121738;
+        color: #f5f5f5;
+    }
+    [data-testid="stSidebar"] * {
+        color: #f5f5f5 !important;
+    }
+    .zalates-header {
+        padding: 1.2rem 1.4rem;
+        border-radius: 1rem;
+        background: linear-gradient(135deg, #1c1f4a 0%, #5e2b83 45%, #09a4b4 100%);
+        color: #ffffff;
+        margin-bottom: 1rem;
     }
     </style>
     """,
@@ -762,16 +738,16 @@ with col_logo:
     if os.path.exists(logo_path):
         st.image(logo_path, use_column_width=True)
 with col_title:
-    st.title("🧹 Zalates Analytics – AI Data-Cleaning, Integration & Analysis Agent")
     st.markdown(
-        "Smart dashboards for **business & bank feasibility / risk analytics** – "
-        "clean, harmonize, and analyze your data in one place."
+        '<div class="zalates-header">'
+        '<h2>🧹 Zalates Analytics – AI Data-Cleaning, Integration & Risk Dashboards</h2>'
+        '<p style="margin-bottom:0;">Clean, harmonize, and analyze data for bank feasibility and business risk decisions.</p>'
+        '</div>',
+        unsafe_allow_html=True,
     )
 
-st.markdown("---")
-
 # --- Sidebar options ---
-st.sidebar.header("Data & Options")
+st.sidebar.subheader("Data Inputs")
 
 use_synthetic = st.sidebar.checkbox("Use synthetic example dataset (test mode)", value=False)
 
@@ -829,7 +805,7 @@ if suggestions:
     st.write(
         "The agent suggests that some variables are likely the **same concept** across datasets.\n"
         "By default, they will be harmonized to a common name when you approve.\n"
-        "✅ Only mark them as unrelated if you are sure they should remain separate."
+        "✅ Only mark them as separate if you are sure they should remain different."
     )
 
     for idx, (f1, c1, c2) in enumerate(suggestions):
@@ -923,7 +899,7 @@ if integrate_and_clean:
 
 # If integration not yet run, stop here
 if "integrated_df" not in st.session_state or "cleaned_df_auto" not in st.session_state:
-    st.info("Click 'Run integration + automatic cleaning' to continue.")
+    st.info("Click **Run integration + automatic cleaning** to continue.")
     st.stop()
 
 integrated_df = st.session_state["integrated_df"]
@@ -1014,166 +990,179 @@ if run_ml:
     else:
         st.write("No anomalies flagged (or model not run).")
 
-# 🔟 EDA & Dashboards on final dataset
-st.subheader("🔟 Exploratory Data Analysis & Dashboards")
+# =========================================
+# 🔟 EDA & DASHBOARD PAGES (via sidebar)
+# =========================================
 
 numeric_cols_all = list(final_df.select_dtypes(include=[np.number]).columns)
 cat_cols_all = list(final_df.select_dtypes(include=["object", "category"]).columns)
 
+st.sidebar.subheader("Analytics workspace")
+page = st.sidebar.radio(
+    "Select analysis page",
+    [
+        "Summary & EDA",
+        "Visualizations",
+        "Slicer / Cross-tabs",
+        "Narrative summary",
+    ],
+)
+
+st.markdown("---")
+
 if not numeric_cols_all and not cat_cols_all:
-    st.write("No numeric or categorical variables available for EDA.")
+    st.write("No numeric or categorical variables available for analysis.")
 else:
-    analysis_scope = st.radio(
-        "Variables for analysis",
-        [
-            "All numeric & categorical variables",
-            "Select variables manually",
-        ],
-    )
+    # Always define selected sets (default: all)
+    numeric_selected = numeric_cols_all
+    cat_selected = cat_cols_all
 
-    if analysis_scope.startswith("Select"):
-        st.markdown("**Select numeric variables (if any)**")
-        numeric_selected = st.multiselect(
-            "Numeric variables",
-            options=numeric_cols_all,
-            default=numeric_cols_all,
-        )
+    # ===== Page 1: Summary & EDA =====
+    if page == "Summary & EDA":
+        st.subheader("📋 Summary & EDA (descriptive statistics)")
 
-        st.markdown("**Select categorical variables (if any)**")
-        cat_selected = st.multiselect(
-            "Categorical variables",
-            options=cat_cols_all,
-            default=cat_cols_all,
-        )
-    else:
-        numeric_selected = numeric_cols_all
-        cat_selected = cat_cols_all
+        if numeric_cols_all:
+            st.markdown("**Numeric variables – descriptive statistics**")
+            st.dataframe(final_df[numeric_cols_all].describe().T)
+        else:
+            st.info("No numeric variables for descriptive statistics.")
 
-    selected_cols = list(dict.fromkeys(numeric_selected + cat_selected))
-    if not selected_cols:
-        st.info("No variables selected for EDA.")
-    else:
-        df_for_eda = final_df[selected_cols].copy()
+        if cat_cols_all:
+            st.markdown("**Categorical variables – top categories**")
+            for col in cat_cols_all[:10]:
+                with st.expander(f"Variable: {col}", expanded=False):
+                    st.write(final_df[col].value_counts(dropna=False).head(15))
+        else:
+            st.info("No categorical variables detected.")
 
-        tab_summary, tab_viz, tab_segment, tab_narr = st.tabs(
-            ["📋 Summary & Stats", "📊 Visualizations", "🧩 Segmented (Slicer) Analysis", "📝 Narrative"]
-        )
+        if len(numeric_cols_all) > 1:
+            st.markdown("**Correlation matrix (numeric only)**")
+            corr = final_df[numeric_cols_all].corr()
+            st.dataframe(corr.style.background_gradient(cmap="coolwarm"))
+        else:
+            st.info("Not enough numeric variables for correlation matrix.")
 
-        # --- Summary & stats ---
-        with tab_summary:
-            show_basic_eda(df_for_eda)
+    # ===== Page 2: Visualizations =====
+    elif page == "Visualizations":
+        st.subheader("📊 Visualizations")
 
-        # --- Visualizations (histograms, categorical charts, map) ---
-        with tab_viz:
-            st.markdown("#### Numeric distributions (histogram-style)")
+        # Numeric histogram-like chart
+        st.markdown("### Numeric distributions")
+        if numeric_cols_all:
+            num_for_hist = st.selectbox(
+                "Choose numeric variable for distribution plot",
+                numeric_cols_all,
+                key="viz_num",
+            )
+            st.bar_chart(
+                final_df[num_for_hist]
+                .dropna()
+                .value_counts()
+                .sort_index()
+            )
+        else:
+            st.info("No numeric variables available for plotting.")
 
-            if numeric_selected:
-                num_for_hist = st.selectbox(
-                    "Choose numeric variable", numeric_selected, key="hist_numeric"
-                )
-                # approximate histogram using value_counts
-                st.bar_chart(
-                    df_for_eda[num_for_hist]
-                    .dropna()
-                    .value_counts()
-                    .sort_index()
-                )
+        # Categorical bar chart
+        st.markdown("### Categorical distributions")
+        if cat_cols_all:
+            cat_for_bar = st.selectbox(
+                "Choose categorical variable",
+                cat_cols_all,
+                key="viz_cat",
+            )
+            cat_counts = (
+                final_df[cat_for_bar]
+                .value_counts(dropna=False)
+                .head(25)
+                .rename("count")
+            )
+            st.bar_chart(cat_counts)
+        else:
+            st.info("No categorical variables available for plotting.")
+
+        # Map (if lat/lon exist)
+        st.markdown("### Map (if latitude & longitude available)")
+        lat_cols = [c for c in final_df.columns if "lat" in c.lower()]
+        lon_cols = [c for c in final_df.columns if "lon" in c.lower() or "lng" in c.lower()]
+
+        if lat_cols and lon_cols:
+            lat_col = lat_cols[0]
+            lon_col = lon_cols[0]
+            map_df = (
+                final_df[[lat_col, lon_col]]
+                .dropna()
+                .rename(columns={lat_col: "lat", lon_col: "lon"})
+            )
+            if not map_df.empty:
+                st.map(map_df)
             else:
-                st.info("No numeric variables selected.")
+                st.info("Latitude/longitude columns detected but all rows are missing.")
+        else:
+            st.caption("No latitude/longitude columns detected for mapping.")
 
-            st.markdown("#### Categorical distributions")
+    # ===== Page 3: Slicer / Cross-tabs =====
+    elif page == "Slicer / Cross-tabs":
+        st.subheader("🧩 Slicer / Cross-tab Dashboards")
 
-            if cat_selected:
-                cat_for_bar = st.selectbox(
-                    "Choose categorical variable", cat_selected, key="bar_categorical"
-                )
-                cat_counts = (
-                    df_for_eda[cat_for_bar]
-                    .value_counts(dropna=False)
-                    .head(20)
-                    .rename("count")
-                )
-                st.bar_chart(cat_counts)
-            else:
-                st.info("No categorical variables selected.")
-
-            st.markdown("#### Map (if latitude & longitude available)")
-            lat_cols = [c for c in final_df.columns if "lat" in c.lower()]
-            lon_cols = [c for c in final_df.columns if "lon" in c.lower() or "lng" in c.lower()]
-
-            if lat_cols and lon_cols:
-                lat_col = lat_cols[0]
-                lon_col = lon_cols[0]
-                map_df = (
-                    final_df[[lat_col, lon_col]]
-                    .dropna()
-                    .rename(columns={lat_col: "lat", lon_col: "lon"})
-                )
-                if not map_df.empty:
-                    st.map(map_df)
-                else:
-                    st.info("Latitude/longitude columns detected but all rows are missing.")
-            else:
-                st.caption("No latitude/longitude columns detected for mapping.")
-
-        # --- Segmented / slicer analysis ---
-        with tab_segment:
-            st.markdown(
-                "#### Slicer analysis – e.g., **income by gender**, "
-                "**education by region**, **income by gender & region**"
+        if not numeric_cols_all or not cat_cols_all:
+            st.info("Need at least one numeric and one categorical variable for slicer analysis.")
+        else:
+            target = st.selectbox(
+                "Select numeric outcome (e.g., income)",
+                numeric_cols_all,
+                key="slicer_target",
+            )
+            slicer_1 = st.selectbox(
+                "First slicer (categorical, e.g., gender or region)",
+                cat_cols_all,
+                key="slicer1",
+            )
+            slicer_2 = st.selectbox(
+                "Optional second slicer (e.g., region)",
+                ["(none)"] + cat_cols_all,
+                key="slicer2",
             )
 
-            if not numeric_cols_all or not cat_cols_all:
-                st.info("Need at least one numeric and one categorical variable for slicer analysis.")
+            st.markdown(
+                "This will show **mean and count** of the outcome by slicer(s) "
+                "(e.g., *income by gender*, *education score by region*)."
+            )
+
+            group_cols = [slicer_1] if slicer_2 == "(none)" else [slicer_1, slicer_2]
+            grouped = (
+                final_df[group_cols + [target]]
+                .dropna(subset=[target])
+                .groupby(group_cols)[target]
+                .agg(["count", "mean"])
+                .reset_index()
+            )
+            grouped.rename(columns={"count": "n", "mean": f"{target}_mean"}, inplace=True)
+
+            st.markdown("**Grouped summary table**")
+            st.dataframe(grouped)
+
+            st.markdown("**Visualization of mean by slicer(s)**")
+            if slicer_2 == "(none)":
+                chart_df = grouped.set_index(slicer_1)[f"{target}_mean"]
+                st.bar_chart(chart_df)
             else:
-                target = st.selectbox(
-                    "Select numeric outcome (e.g., income)",
-                    numeric_cols_all,
-                    key="slicer_target",
+                pivot = grouped.pivot(
+                    index=slicer_1,
+                    columns=slicer_2,
+                    values=f"{target}_mean",
                 )
-                slicer_1 = st.selectbox(
-                    "First slicer (categorical)", cat_cols_all, key="slicer1"
-                )
-                slicer_2 = st.selectbox(
-                    "Optional second slicer",
-                    ["(none)"] + cat_cols_all,
-                    key="slicer2",
-                )
+                st.bar_chart(pivot)
 
-                if st.button("Run slicer analysis"):
-                    group_cols = [slicer_1] if slicer_2 == "(none)" else [slicer_1, slicer_2]
-                    grouped = (
-                        final_df[group_cols + [target]]
-                        .dropna(subset=[target])
-                        .groupby(group_cols)[target]
-                        .agg(["count", "mean"])
-                        .reset_index()
-                    )
-                    grouped.rename(columns={"count": "n", "mean": f"{target}_mean"}, inplace=True)
-
-                    st.markdown("**Grouped summary**")
-                    st.dataframe(grouped)
-
-                    st.markdown("**Visualization of mean by slicer(s)**")
-                    if slicer_2 == "(none)":
-                        chart_df = grouped.set_index(slicer_1)[f"{target}_mean"]
-                        st.bar_chart(chart_df)
-                    else:
-                        pivot = grouped.pivot(
-                            index=slicer_1,
-                            columns=slicer_2,
-                            values=f"{target}_mean",
-                        )
-                        st.bar_chart(pivot)
-
-        # --- Narrative summary ---
-        with tab_narr:
-            narrative = generate_narrative_from_eda(df_for_eda, title="selected variables")
-            st.markdown(narrative)
+    # ===== Page 4: Narrative summary =====
+    elif page == "Narrative summary":
+        st.subheader("📝 Narrative summary of dataset")
+        narrative = generate_narrative_from_eda(final_df, title="full dataset")
+        st.markdown(narrative)
 
 st.markdown("---")
 st.caption(
-    "Automatic cleaning is applied by default, but you always remain in control. "
-    "Use slicers and dashboards to explore income by gender, education by region, "
-    "or any other business-risk lens relevant for your feasibility analysis."
+    "Automatic cleaning is applied by default, but you remain in control. "
+    "Use the EDA, Visualizations, and Slicer pages to explore feasibility and risk patterns "
+    "such as income by gender, education by region, or any other Zalates Analytics lens."
 )
