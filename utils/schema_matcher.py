@@ -1,6 +1,6 @@
 # utils/schema_matcher.py
 from collections import defaultdict
-from fuzzywuzzy import fuzz
+from rapidfuzz import fuzz
 
 def normalize_col(col: str) -> str:
     if not isinstance(col, str):
