@@ -1,6 +1,6 @@
 """
 Zalates Analytics – AI Data Cleaning & Integration Agent
-(Readable theme + separate pages for EDA, Visualizations, and Slicer dashboards)
+(Futuristic theme + GPS country maps + separate pages for EDA, Visualizations, and Slicer dashboards)
 """
 
 import os
@@ -10,6 +10,7 @@ from typing import Dict, List, Tuple
 import numpy as np
 import pandas as pd
 import streamlit as st
+import plotly.express as px  # for nicer geo maps
 
 # Optional imports for SPSS
 try:
@@ -700,24 +701,29 @@ st.set_page_config(
     layout="wide",
 )
 
-# Light background, dark text; gradient header only
+# Futuristic but readable theme
 st.markdown(
     """
     <style>
     .stApp {
-        background-color: #f5f7fb;
-        color: #222222;
+        background: radial-gradient(circle at 0% 0%, #0b132b 0%, #151a3c 35%, #04151f 100%);
     }
     .block-container {
         padding-top: 1rem;
         padding-bottom: 2rem;
+        background-color: #ffffff;
+        color: #111827;
+        border-radius: 18px;
+        box-shadow: 0 18px 40px rgba(0, 0, 0, 0.28);
+        margin-top: 1rem;
+        margin-bottom: 2rem;
     }
     [data-testid="stSidebar"] {
-        background: #121738;
-        color: #f5f5f5;
+        background: linear-gradient(180deg, #050816 0%, #151a3c 40%, #0f766e 100%);
+        color: #e5e7eb;
     }
     [data-testid="stSidebar"] * {
-        color: #f5f5f5 !important;
+        color: #e5e7eb !important;
     }
     .zalates-header {
         padding: 1.2rem 1.4rem;
@@ -741,7 +747,7 @@ with col_title:
     st.markdown(
         '<div class="zalates-header">'
         '<h2>🧹 Zalates Analytics – AI Data-Cleaning, Integration & Risk Dashboards</h2>'
-        '<p style="margin-bottom:0;">Clean, harmonize, and analyze data for bank feasibility and business risk decisions.</p>'
+        '<p style="margin-bottom:0;">Clean, harmonize, and analyze data for bank feasibility, food security, and business risk decisions.</p>'
         '</div>',
         unsafe_allow_html=True,
     )
@@ -755,6 +761,11 @@ uploaded_files = st.sidebar.file_uploader(
     "Upload one or more datasets",
     accept_multiple_files=True,
     type=["csv", "xlsx", "xls", "dta", "sav", "json", "pkl", "pickle", "tsv", "txt"],
+)
+
+st.sidebar.caption(
+    "Tip: For GPS maps, include `latitude` / `longitude` (or `lat` / `lon`) and a "
+    "food security indicator (e.g., `hfias`, `fcs`, `food_security_cat`)."
 )
 
 # Collect raw dfs
@@ -1013,10 +1024,6 @@ st.markdown("---")
 if not numeric_cols_all and not cat_cols_all:
     st.write("No numeric or categorical variables available for analysis.")
 else:
-    # Always define selected sets (default: all)
-    numeric_selected = numeric_cols_all
-    cat_selected = cat_cols_all
-
     # ===== Page 1: Summary & EDA =====
     if page == "Summary & EDA":
         st.subheader("📋 Summary & EDA (descriptive statistics)")
@@ -1082,24 +1089,103 @@ else:
             st.info("No categorical variables available for plotting.")
 
         # Map (if lat/lon exist)
-        st.markdown("### Map (if latitude & longitude available)")
+        st.markdown("### GPS / Country Map (if latitude & longitude available)")
+
         lat_cols = [c for c in final_df.columns if "lat" in c.lower()]
         lon_cols = [c for c in final_df.columns if "lon" in c.lower() or "lng" in c.lower()]
+        country_candidates = [
+            c for c in final_df.columns
+            if any(k in c.lower() for k in ["country", "nation", "iso3", "iso2"])
+        ]
 
         if lat_cols and lon_cols:
+            st.info(
+                "A GPS map is available because latitude/longitude columns were detected. "
+                "To colour the map (e.g., food security from red=poor to green=good), "
+                "select an indicator below."
+            )
+
             lat_col = lat_cols[0]
             lon_col = lon_cols[0]
-            map_df = (
-                final_df[[lat_col, lon_col]]
-                .dropna()
-                .rename(columns={lat_col: "lat", lon_col: "lon"})
+
+            country_col = st.selectbox(
+                "Country column (optional, for hover labels)",
+                ["(none)"] + country_candidates,
+                index=1 if country_candidates else 0,
             )
-            if not map_df.empty:
-                st.map(map_df)
-            else:
-                st.info("Latitude/longitude columns detected but all rows are missing.")
+
+            # Try to guess a food-security style variable
+            fs_suggestions = [
+                c for c in final_df.columns
+                if any(
+                    k in c.lower()
+                    for k in ["food", "hfias", "fcs", "hfi", "diet", "dds", "foodsec"]
+                )
+            ]
+            color_options = ["(none)"] + list(final_df.columns)
+            default_index = 0
+            if fs_suggestions:
+                # +1 because of "(none)"
+                default_index = color_options.index(fs_suggestions[0]) if fs_suggestions[0] in color_options else 0
+
+            color_col = st.selectbox(
+                "Indicator for colour shading (e.g., food security index/category)",
+                color_options,
+                index=default_index,
+            )
+
+            create_map = st.checkbox(
+                "Create GPS-based country map with colour categories (red=poor, green=good)",
+                value=True,
+            )
+
+            if create_map:
+                cols_to_use = [lat_col, lon_col]
+                rename_map = {lat_col: "lat", lon_col: "lon"}
+
+                if country_col != "(none)":
+                    cols_to_use.append(country_col)
+                if color_col != "(none)":
+                    cols_to_use.append(color_col)
+
+                map_df = final_df[cols_to_use].dropna(subset=[lat_col, lon_col]).copy()
+                map_df = map_df.rename(columns=rename_map)
+
+                if map_df.empty:
+                    st.info("Latitude/longitude columns detected but all rows are missing.")
+                else:
+                    if color_col != "(none)":
+                        # Continuous vs categorical colour
+                        if pd.api.types.is_numeric_dtype(final_df[color_col]):
+                            fig = px.scatter_geo(
+                                map_df,
+                                lat="lat",
+                                lon="lon",
+                                color=color_col,
+                                hover_name=country_col if country_col != "(none)" else None,
+                                color_continuous_scale="RdYlGn",
+                                title="GPS points coloured by selected indicator (green = better)",
+                            )
+                        else:
+                            fig = px.scatter_geo(
+                                map_df,
+                                lat="lat",
+                                lon="lon",
+                                color=color_col,
+                                hover_name=country_col if country_col != "(none)" else None,
+                                title="GPS points coloured by selected indicator",
+                            )
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        # Simple map with no colour
+                        st.map(
+                            map_df[["lat", "lon"]],
+                            zoom=None,
+                            use_container_width=True,
+                        )
         else:
-            st.caption("No latitude/longitude columns detected for mapping.")
+            st.caption("No latitude/longitude columns detected for mapping. "
+                       "To enable maps, add `latitude`/`longitude` columns to your dataset.")
 
     # ===== Page 3: Slicer / Cross-tabs =====
     elif page == "Slicer / Cross-tabs":
@@ -1109,7 +1195,7 @@ else:
             st.info("Need at least one numeric and one categorical variable for slicer analysis.")
         else:
             target = st.selectbox(
-                "Select numeric outcome (e.g., income)",
+                "Select numeric outcome (e.g., income or food security score)",
                 numeric_cols_all,
                 key="slicer_target",
             )
@@ -1126,7 +1212,7 @@ else:
 
             st.markdown(
                 "This will show **mean and count** of the outcome by slicer(s) "
-                "(e.g., *income by gender*, *education score by region*)."
+                "(e.g., *income by gender*, *food security by region*)."
             )
 
             group_cols = [slicer_1] if slicer_2 == "(none)" else [slicer_1, slicer_2]
@@ -1163,6 +1249,6 @@ else:
 st.markdown("---")
 st.caption(
     "Automatic cleaning is applied by default, but you remain in control. "
-    "Use the EDA, Visualizations, and Slicer pages to explore feasibility and risk patterns "
-    "such as income by gender, education by region, or any other Zalates Analytics lens."
+    "Use the EDA, Visualizations, Slicer, and GPS maps to explore feasibility, "
+    "food security gradients (red → green), and risk patterns across regions and countries."
 )
