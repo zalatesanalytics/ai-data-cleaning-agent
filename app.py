@@ -284,48 +284,83 @@ def detect_duplicates(df: pd.DataFrame, id_cols: List[str]) -> Dict[str, int]:
 
 def detect_logical_inconsistencies(df: pd.DataFrame) -> List[str]:
     """
-    Simple logical rules:
-    - age < 15 and education_level in [College/University]
-    - employed == "Yes" and income == 0 or NaN
+    Detect simple logical inconsistencies such as:
+    - age < 15 and higher education (university/college/bachelor/master/etc.)
+    - employed == "Yes" and income <= 0 or missing
+    Works robustly with varied column names and mixed types.
     """
     messages: List[str] = []
 
-    # map lower col names
-    lower_name_map = {c.lower(): c for c in df.columns}
+    # ---------- Find an age column ----------
+    age_col = None
+    age_series = None
 
-    # Age & education rule
-    if "age" in lower_name_map and "education_level" in lower_name_map:
-        age_col = lower_name_map["age"]
-        edu_col = lower_name_map["education_level"]
-        subset = df[[age_col, edu_col]].copy()
-        with np.errstate(invalid="ignore"):
-            mask = (subset[age_col] < 15) & subset[edu_col].isin(["College", "University"])
-        count = int(mask.sum())
+    for c in df.columns:
+        if "age" in c.lower():
+            s = pd.to_numeric(df[c], errors="coerce")
+            if s.notna().sum() > 0:
+                age_col = c
+                age_series = s
+                break  # take the first reasonable age column
+
+    # ---------- Find an education column ----------
+    edu_col = None
+    edu_keywords = ["educ", "school", "grade", "class", "level"]
+
+    for c in df.columns:
+        name = c.lower()
+        if any(k in name for k in edu_keywords):
+            edu_col = c
+            break
+
+    # ---------- Rule 1: Young age with higher education ----------
+    if age_col is not None and edu_col is not None:
+        edu_series = df[edu_col].astype(str).str.lower()
+        higher_terms = [
+            "university",
+            "college",
+            "bachelor",
+            "master",
+            "phd",
+            "higher",
+            "diploma",
+            "degree",
+        ]
+
+        higher_mask = edu_series.str.contains("|".join(higher_terms), na=False)
+        young_mask = age_series < 15
+
+        count = int((young_mask & higher_mask).sum())
         if count > 0:
             messages.append(
-                f"{count} records: age < 15 but education level is College/University."
+                f"{count} records: age < 15 but education suggests higher/tertiary level "
+                f"(column '{edu_col}')."
             )
 
-    # Employed vs income
+    # ---------- Find employment and income columns ----------
     emp_col = None
     income_col = None
+
     for c in df.columns:
         lc = c.lower()
-        if lc in {"employed", "employment_status"}:
+        if emp_col is None and lc in {"employed", "employment_status", "employment", "work_status"}:
             emp_col = c
-        if "income" in lc or "salary" in lc:
+        if income_col is None and any(k in lc for k in ["income", "salary", "wage", "earning", "pay"]):
             income_col = c
 
-    if emp_col and income_col:
-        subset = df[[emp_col, income_col]].copy()
+    # ---------- Rule 2: Employed == Yes but income <= 0 or missing ----------
+    if emp_col is not None and income_col is not None:
+        emp_series = df[emp_col].astype(str).str.lower()
+        inc_series = pd.to_numeric(df[income_col], errors="coerce")
+
         with np.errstate(invalid="ignore"):
-            mask = (subset[emp_col].astype(str).str.lower() == "yes") & (
-                (subset[income_col] <= 0) | subset[income_col].isna()
-            )
+            mask = (emp_series == "yes") & ((inc_series <= 0) | inc_series.isna())
+
         count = int(mask.sum())
         if count > 0:
             messages.append(
-                f"{count} records: employed='Yes' but income is 0 or missing."
+                f"{count} records: employed='Yes' but income is 0 or missing "
+                f"(columns '{emp_col}' and '{income_col}')."
             )
 
     return messages
