@@ -1,26 +1,3 @@
-Love this direction — let’s make the “automatic cleaning” really *aggressive* so you don’t see negative ages, negative incomes, or uncorrected inconsistencies after cleaning.
-
-Below is a **ready-to-paste full `app.py`** with a much stronger cleaning pipeline:
-
-* **Strong numeric cleaning**:
-
-  * Converts numeric-like text to numbers.
-  * For `age*` columns: invalid (<0 or >120) → `NaN`, then impute median age; final clip to `[0,120]`.
-  * For income-like columns (`income`, `salary`, `wage`, `earning`, `pay`): invalid (<0 or >1,000,000) → `NaN`, then impute median; final clip to `[0,1,000,000]`.
-  * For other numeric columns: trim extreme outliers beyond `Q1 ± 3*IQR` → `NaN`, then impute median.
-* **Categorical cleaning**:
-
-  * Impute missing categorical values with mode.
-* **Logical fixes**:
-
-  * Age < 18 + “university/college/degree” → education reset to dominant level for that age band (e.g. secondary).
-  * Employed = “Yes” + income ≤ 0 or missing → income set to median positive income among employed.
-
-So after **Automatic cleaning**, you should *not* see negative ages/incomes, and inconsistencies should be heavily reduced.
-
----
-
-```python
 import io
 import os
 import pickle
@@ -1095,6 +1072,3 @@ st.caption(
     "All cleaning steps are transparent and reproducible. "
     "Please review flagged issues and narratives before making final analytical decisions."
 )
-```
-
-If, after this, you still see negatives or weird ages *in the AFTER tables*, tell me the exact column names that are misbehaving (e.g., `age_yrs`, `hh_income`) and I’ll extend the rules to explicitly catch those patterns too.
