@@ -1,4 +1,3 @@
-# utils/schema_matcher.py
 from collections import defaultdict
 from rapidfuzz import fuzz
 
@@ -11,6 +10,7 @@ def suggest_column_groups(list_of_column_lists, threshold: int = 80):
     """
     Input: list_of_column_lists = [cols_ds1, cols_ds2, ...]
     Output: list of groups, each group is a list of column names that look similar.
+    Uses rapidfuzz for fast column name similarity.
     """
     all_cols = []
     for cols in list_of_column_lists:
