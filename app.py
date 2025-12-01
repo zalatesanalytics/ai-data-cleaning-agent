@@ -1,3 +1,26 @@
+Love this direction — let’s make the “automatic cleaning” really *aggressive* so you don’t see negative ages, negative incomes, or uncorrected inconsistencies after cleaning.
+
+Below is a **ready-to-paste full `app.py`** with a much stronger cleaning pipeline:
+
+* **Strong numeric cleaning**:
+
+  * Converts numeric-like text to numbers.
+  * For `age*` columns: invalid (<0 or >120) → `NaN`, then impute median age; final clip to `[0,120]`.
+  * For income-like columns (`income`, `salary`, `wage`, `earning`, `pay`): invalid (<0 or >1,000,000) → `NaN`, then impute median; final clip to `[0,1,000,000]`.
+  * For other numeric columns: trim extreme outliers beyond `Q1 ± 3*IQR` → `NaN`, then impute median.
+* **Categorical cleaning**:
+
+  * Impute missing categorical values with mode.
+* **Logical fixes**:
+
+  * Age < 18 + “university/college/degree” → education reset to dominant level for that age band (e.g. secondary).
+  * Employed = “Yes” + income ≤ 0 or missing → income set to median positive income among employed.
+
+So after **Automatic cleaning**, you should *not* see negative ages/incomes, and inconsistencies should be heavily reduced.
+
+---
+
+```python
 import io
 import os
 import pickle
@@ -285,7 +308,7 @@ def detect_duplicates(df: pd.DataFrame, id_cols: List[str]) -> Dict[str, int]:
 def detect_logical_inconsistencies(df: pd.DataFrame) -> List[str]:
     """
     Detect simple logical inconsistencies such as:
-    - age < 15 and higher education (university/college/bachelor/master/etc.)
+    - adolescent age and higher education (university/college/bachelor/master/etc.)
     - employed == "Yes" and income <= 0 or missing
     Works robustly with varied column names and mixed types.
     """
@@ -313,7 +336,7 @@ def detect_logical_inconsistencies(df: pd.DataFrame) -> List[str]:
             edu_col = c
             break
 
-    # ---------- Rule 1: Young age with higher education ----------
+    # ---------- Rule 1: Adolescent age with higher education ----------
     if age_col is not None and edu_col is not None:
         edu_series = df[edu_col].astype(str).str.lower()
         higher_terms = [
@@ -328,13 +351,13 @@ def detect_logical_inconsistencies(df: pd.DataFrame) -> List[str]:
         ]
 
         higher_mask = edu_series.str.contains("|".join(higher_terms), na=False)
-        # focus on adolescent band 12–17 for corrections
-        young_mask = (age_series >= 12) & (age_series <= 17)
+        # adolescent band: 5–17
+        young_mask = (age_series >= 5) & (age_series < 18)
 
         count = int((young_mask & higher_mask).sum())
         if count > 0:
             messages.append(
-                f"{count} records: age 12–17 but education suggests higher/tertiary level "
+                f"{count} records: age 5–17 but education suggests higher/tertiary level "
                 f"(column '{edu_col}')."
             )
 
@@ -369,7 +392,7 @@ def detect_logical_inconsistencies(df: pd.DataFrame) -> List[str]:
 
 def auto_fix_age_education_inconsistencies(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Fix cases where age is in 12–17 band but education is unrealistically high.
+    Fix cases where age is in 5–17 band but education is unrealistically high.
     We reassign education to the most common realistic level observed in that age band.
     """
     df = df.copy()
@@ -400,7 +423,7 @@ def auto_fix_age_education_inconsistencies(df: pd.DataFrame) -> pd.DataFrame:
     edu_series = df[edu_col].astype(str)
 
     # Define adolescent band and "higher" education markers
-    band_mask = (age_series >= 12) & (age_series <= 17)
+    band_mask = (age_series >= 5) & (age_series < 18)
     higher_terms = [
         "university",
         "college",
@@ -421,7 +444,7 @@ def auto_fix_age_education_inconsistencies(df: pd.DataFrame) -> pd.DataFrame:
     # Normal (non-inconsistent) adolescents for reference
     normal_band_mask = band_mask & ~inconsistent_mask
     if normal_band_mask.sum() > 0:
-        # Use mode of education among 12–17 non-inconsistent cases
+        # Use mode of education among 5–17 non-inconsistent cases
         mode_vals = edu_series[normal_band_mask].mode()
         if len(mode_vals) > 0:
             replacement = mode_vals.iloc[0]
@@ -435,16 +458,115 @@ def auto_fix_age_education_inconsistencies(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def auto_impute_numeric_missing(df: pd.DataFrame) -> pd.DataFrame:
+def auto_fix_employment_income_inconsistencies(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Impute missing numeric values using the column median (robust default).
+    For employed='Yes' with income <=0 or missing, impute income using median
+    positive income among employed.
     """
     df = df.copy()
-    numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-    for col in numeric_cols:
+
+    # Detect columns as in detect_logical_inconsistencies
+    emp_col = None
+    income_col = None
+    for c in df.columns:
+        lc = c.lower()
+        if emp_col is None and lc in {"employed", "employment_status", "employment", "work_status"}:
+            emp_col = c
+        if income_col is None and any(k in lc for k in ["income", "salary", "wage", "earning", "pay"]):
+            income_col = c
+
+    if emp_col is None or income_col is None:
+        return df
+
+    emp_series = df[emp_col].astype(str).str.lower()
+    inc_series = pd.to_numeric(df[income_col], errors="coerce")
+
+    # Median positive income among employed
+    employed_mask = emp_series == "yes"
+    valid_income_mask = employed_mask & (inc_series > 0)
+    if valid_income_mask.sum() == 0:
+        return df
+
+    median_income = inc_series[valid_income_mask].median()
+
+    fix_mask = employed_mask & ((inc_series <= 0) | inc_series.isna())
+    df.loc[fix_mask, income_col] = median_income
+
+    return df
+
+
+def strong_numeric_cleaning(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Strong numeric cleaning:
+    - Converts numeric-like text to numeric.
+    - Age-like columns: remove values <0 or >120, then impute median, clip [0,120].
+    - Income-like columns: remove values <0 or >1,000,000, then impute median, clip [0,1,000,000].
+    - Other numeric columns: trim extreme outliers (Q1±3*IQR), then impute median.
+    """
+    df = df.copy()
+
+    for col in df.columns:
+        # Ensure numeric where possible
+        if df[col].dtype == "object":
+            # Try convert to numeric; if it fails for all, we keep as object
+            converted = pd.to_numeric(df[col], errors="coerce")
+            if converted.notna().sum() > 0:
+                df[col] = converted
+
+        if not pd.api.types.is_numeric_dtype(df[col]):
+            continue
+
+        s = pd.to_numeric(df[col], errors="coerce")
+
+        col_lower = col.lower()
+        if "age" in col_lower:
+            # Age: 0–120
+            s = s.where((s >= 0) & (s <= 120), np.nan)
+            if s.notna().sum() > 0:
+                median_age = s.median()
+                s = s.fillna(median_age)
+            s = s.clip(lower=0, upper=120)
+            df[col] = s
+
+        elif any(k in col_lower for k in ["income", "salary", "wage", "earning", "pay"]):
+            # Income: 0–1e6
+            s = s.where((s >= 0) & (s <= 1_000_000), np.nan)
+            if s.notna().sum() > 0:
+                median_inc = s.median()
+                s = s.fillna(median_inc)
+            s = s.clip(lower=0, upper=1_000_000)
+            df[col] = s
+
+        else:
+            # Generic numeric: trim extreme outliers and impute
+            s_valid = s.dropna()
+            if s_valid.empty:
+                df[col] = s
+                continue
+            q1, q3 = np.percentile(s_valid, [25, 75])
+            iqr = q3 - q1
+            lower = q1 - 3 * iqr
+            upper = q3 + 3 * iqr
+            s = s.where((s >= lower) & (s <= upper), np.nan)
+            if s.notna().sum() > 0:
+                median_val = s.median()
+                s = s.fillna(median_val)
+            df[col] = s
+
+    return df
+
+
+def auto_impute_categorical_missing(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Impute missing categorical values using the mode of each column.
+    """
+    df = df.copy()
+    cat_cols = df.select_dtypes(include=["object", "category"]).columns
+    for col in cat_cols:
         if df[col].isna().any():
-            median_val = df[col].median()
-            df[col] = df[col].fillna(median_val)
+            mode_vals = df[col].mode(dropna=True)
+            if len(mode_vals) > 0:
+                df[col] = df[col].fillna(mode_vals.iloc[0])
     return df
 
 
@@ -836,7 +958,7 @@ cleaning_mode = st.radio(
     "Choose data-cleaning mode",
     [
         "Manual review only (no automatic fixes)",
-        "Automatic cleaning (impute numeric missing, cap extremes, and fix age–education inconsistencies)",
+        "Automatic cleaning (strong numeric & categorical cleaning + logical fixes)",
     ],
 )
 
@@ -844,34 +966,17 @@ cleaning_mode = st.radio(
 if cleaning_mode.startswith("Automatic"):
     df_clean = integrated_df.copy()
 
-    # Convert numeric-like object columns
-    for col in df_clean.columns:
-        if df_clean[col].dtype == "object":
-            try:
-                converted = pd.to_numeric(df_clean[col], errors="coerce")
-                # keep conversion only if it yields some non-NaN numeric values
-                if converted.notna().sum() > 0:
-                    df_clean[col] = converted
-            except Exception:
-                continue
+    # Strong numeric cleaning (conversions, bounds, imputation)
+    df_clean = strong_numeric_cleaning(df_clean)
 
-    # Age capping
-    for col in df_clean.columns:
-        if "age" in col.lower() and pd.api.types.is_numeric_dtype(df_clean[col]):
-            df_clean[col] = df_clean[col].clip(lower=0, upper=120)
+    # Categorical imputation
+    df_clean = auto_impute_categorical_missing(df_clean)
 
-    # Income capping
-    for col in df_clean.columns:
-        if ("income" in col.lower() or "salary" in col.lower()) and pd.api.types.is_numeric_dtype(
-            df_clean[col]
-        ):
-            df_clean[col] = df_clean[col].clip(lower=0, upper=1_000_000)
-
-    # Impute numeric missing values (median)
-    df_clean = auto_impute_numeric_missing(df_clean)
-
-    # Auto-fix age–education inconsistencies in the adolescent band
+    # Logical fixes: age–education inconsistencies
     df_clean = auto_fix_age_education_inconsistencies(df_clean)
+
+    # Logical fixes: employment–income inconsistencies
+    df_clean = auto_fix_employment_income_inconsistencies(df_clean)
 
     cleaned_df = df_clean
 else:
@@ -888,7 +993,7 @@ with col1:
     st.markdown("**Missing values – before cleaning**")
     st.dataframe(miss_before)
 with col2:
-    st.markdown("**Missing values – after cleaning (with imputation, if enabled)**")
+    st.markdown("**Missing values – after cleaning**")
     st.dataframe(miss_after)
 
 st.markdown("**Numeric extremes & impossible values – after cleaning**")
@@ -990,3 +1095,6 @@ st.caption(
     "All cleaning steps are transparent and reproducible. "
     "Please review flagged issues and narratives before making final analytical decisions."
 )
+```
+
+If, after this, you still see negatives or weird ages *in the AFTER tables*, tell me the exact column names that are misbehaving (e.g., `age_yrs`, `hh_income`) and I’ll extend the rules to explicitly catch those patterns too.
