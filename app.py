@@ -1,4 +1,3 @@
-import io
 import os
 import pickle
 from typing import Dict, List, Tuple
@@ -13,11 +12,8 @@ try:
 except ImportError:
     pyreadstat = None
 
-# We'll import sklearn lazily inside functions to avoid hard failure if missing
-
-
 # =========================================
-# 1. Utility: synthetic example dataset
+# 1. Synthetic demo dataset
 # =========================================
 
 def generate_synthetic_dataset(n: int = 300) -> pd.DataFrame:
@@ -60,11 +56,14 @@ def generate_synthetic_dataset(n: int = 300) -> pd.DataFrame:
 
 
 # =========================================
-# 2. File loading
+# 2. File loading helpers
 # =========================================
 
-def load_file(uploaded_file) -> pd.DataFrame:
-    """Load a file into a pandas DataFrame based on extension."""
+ALLOWED_EXTS = [".csv", ".xlsx", ".xls", ".dta", ".sav", ".json", ".pkl", ".pickle", ".tsv", ".txt"]
+
+
+def load_uploaded_file(uploaded_file) -> pd.DataFrame:
+    """Load a Streamlit-uploaded file into a pandas DataFrame based on extension."""
     name = uploaded_file.name.lower()
 
     if name.endswith(".csv"):
@@ -87,6 +86,47 @@ def load_file(uploaded_file) -> pd.DataFrame:
 
     # Fallback: try CSV
     return pd.read_csv(uploaded_file)
+
+
+def load_local_sample(path: str) -> pd.DataFrame:
+    """Load a sample file from ./data directory by path."""
+    name = path.lower()
+
+    if name.endswith(".csv"):
+        return pd.read_csv(path)
+    if name.endswith(".xlsx") or name.endswith(".xls"):
+        return pd.read_excel(path)
+    if name.endswith(".dta"):
+        return pd.read_stata(path)
+    if name.endswith(".sav"):
+        if pyreadstat is None:
+            raise ImportError("pyreadstat is required to read .sav files. Please install it.")
+        df, _ = pyreadstat.read_sav(path)
+        return df
+    if name.endswith(".json"):
+        return pd.read_json(path)
+    if name.endswith(".pkl") or name.endswith(".pickle"):
+        with open(path, "rb") as f:
+            return pickle.load(f)
+    if name.endswith(".tsv") or name.endswith(".txt"):
+        return pd.read_csv(path, sep="\t")
+
+    return pd.read_csv(path)
+
+
+def discover_sample_datasets(data_dir: str = "data") -> Dict[str, str]:
+    """Return dict {display_name: path} for sample files in ./data."""
+    samples: Dict[str, str] = {}
+    if not os.path.isdir(data_dir):
+        return samples
+
+    for fname in os.listdir(data_dir):
+        path = os.path.join(data_dir, fname)
+        if not os.path.isfile(path):
+            continue
+        if any(fname.lower().endswith(ext) for ext in ALLOWED_EXTS):
+            samples[fname] = path
+    return samples
 
 
 # =========================================
@@ -201,15 +241,10 @@ def basic_cleaning(df: pd.DataFrame) -> pd.DataFrame:
     # Strip whitespace in object columns
     for col in df.select_dtypes(include=["object"]).columns:
         df[col] = df[col].astype(str).str.strip()
-
-        # Replace placeholder values with NaN
         df[col] = df[col].replace(list(PLACEHOLDER_VALUES), np.nan)
 
-    # Drop fully empty rows/columns
     df = df.dropna(how="all")
     df = df.dropna(axis=1, how="all")
-
-    # Reset index & ensure unique columns
     df = df.reset_index(drop=True)
     df = df.loc[:, ~df.columns.duplicated()]
 
@@ -230,10 +265,7 @@ def detect_missingness(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def detect_numeric_extremes(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Flag potential extreme values for numeric columns.
-    Uses generic IQR + some domain rules for age/income-like columns.
-    """
+    """Flag potential extreme values for numeric columns."""
     rows = []
     num_df = df.select_dtypes(include=[np.number])
     for col in num_df.columns:
@@ -283,14 +315,8 @@ def detect_duplicates(df: pd.DataFrame, id_cols: List[str]) -> Dict[str, int]:
 
 
 def detect_logical_inconsistencies(df: pd.DataFrame) -> List[str]:
-    """
-    Simple logical rules:
-    - age < 15 and education_level in [College/University]
-    - employed == "Yes" and income == 0 or NaN
-    """
+    """Simple logical rules for inconsistencies."""
     messages: List[str] = []
-
-    # map lower col names
     lower_name_map = {c.lower(): c for c in df.columns}
 
     # Age & education rule
@@ -350,7 +376,6 @@ def run_isolation_forest(df: pd.DataFrame, contamination: float = 0.05) -> pd.Se
 
     model = IsolationForest(contamination=contamination, random_state=42)
     preds = model.fit_predict(num_df)
-    # Convert to full-index series
     anomaly = pd.Series(0, index=df.index)
     anomaly.loc[num_df.index] = (preds == -1).astype(int)
     return anomaly
@@ -364,15 +389,12 @@ def harmonize_columns(
     dfs: Dict[str, pd.DataFrame],
     mappings: Dict[str, Dict[str, str]],
 ) -> Dict[str, pd.DataFrame]:
-    """
-    Apply user-defined mappings: mappings[file][old_col] = new_col.
-    """
+    """Apply user-defined mappings: mappings[file][old_col] = new_col."""
     out: Dict[str, pd.DataFrame] = {}
     for fname, df in dfs.items():
         df = df.copy()
         if fname in mappings:
             df = df.rename(columns=mappings[fname])
-        # Ensure uniqueness after rename
         df = df.loc[:, ~df.columns.duplicated()]
         out[fname] = df
     return out
@@ -421,10 +443,13 @@ def safely_merge(dfs: Dict[str, pd.DataFrame], key: str, how: str = "outer") -> 
 # =========================================
 
 def show_basic_eda(df: pd.DataFrame):
-    st.markdown("### 📊 Descriptive Statistics")
-    st.write(df.describe(include=[np.number]).T)
+    st.markdown("#### 📊 Descriptive Statistics")
+    if df.select_dtypes(include=[np.number]).shape[1] > 0:
+        st.dataframe(df.describe(include=[np.number]).T)
+    else:
+        st.write("No numeric columns found.")
 
-    st.markdown("### 📋 Categorical Frequencies (Top 10)")
+    st.markdown("#### 📋 Categorical Frequencies (Top 10)")
     cat_cols = df.select_dtypes(include=["object", "category"]).columns
     if len(cat_cols) == 0:
         st.write("No categorical columns detected.")
@@ -433,7 +458,7 @@ def show_basic_eda(df: pd.DataFrame):
             with st.expander(f"Variable: {col}", expanded=False):
                 st.write(df[col].value_counts(dropna=False).head(10))
 
-    st.markdown("### 🔗 Correlation Heatmap (numeric)")
+    st.markdown("#### 🔗 Correlation Heatmap (numeric)")
     num_df = df.select_dtypes(include=[np.number])
     if num_df.shape[1] > 1:
         corr = num_df.corr()
@@ -441,7 +466,7 @@ def show_basic_eda(df: pd.DataFrame):
     else:
         st.write("Not enough numeric variables for correlation heatmap.")
 
-    st.markdown("### 📈 Simple Plots")
+    st.markdown("#### 📈 Simple Histogram")
     num_cols = list(num_df.columns)
     if num_cols:
         col_to_plot = st.selectbox("Select numeric variable for histogram", num_cols)
@@ -451,7 +476,7 @@ def show_basic_eda(df: pd.DataFrame):
 
 
 # =========================================
-# 8. Streamlit App
+# 8. Streamlit App – Dashboard Layout
 # =========================================
 
 st.set_page_config(page_title="AI Data Cleaning & Integration Agent", layout="wide")
@@ -462,266 +487,303 @@ st.write(
     """
 This agent ingests multiple datasets (CSV, Excel, Stata, SPSS, JSON, pickle), 
 detects schema similarities, diagnoses data-quality issues, supports append/merge 
-integration, and prepares clean, analysis-ready data with basic EDA and optional 
+integration, and prepares clean, analysis-ready data with EDA and optional 
 ML-based anomaly detection.
 """
 )
 
-# --- Sidebar options ---
-st.sidebar.header("Options")
+# Sidebar: data source
+st.sidebar.header("Data Source")
 
-use_synthetic = st.sidebar.checkbox("Use synthetic example dataset", value=False)
-
-uploaded_files = st.file_uploader(
-    "Upload one or more datasets",
-    accept_multiple_files=True,
-    type=["csv", "xlsx", "xls", "dta", "sav", "json", "pkl", "pickle", "tsv", "txt"],
+data_mode = st.sidebar.radio(
+    "Choose data source:",
+    ["Upload your own files", "Built-in sample files (./data)", "Synthetic demo"],
 )
 
 dfs_raw: Dict[str, pd.DataFrame] = {}
 
-if use_synthetic:
-    dfs_raw["synthetic.csv"] = generate_synthetic_dataset()
+# --- Mode 1: Upload files ---
+if data_mode == "Upload your own files":
+    uploaded_files = st.sidebar.file_uploader(
+        "Upload one or more datasets",
+        accept_multiple_files=True,
+        type=[ext.replace(".", "") for ext in ALLOWED_EXTS],
+    )
+    if uploaded_files:
+        for uf in uploaded_files:
+            try:
+                df = load_uploaded_file(uf)
+                dfs_raw[uf.name] = df
+            except Exception as e:
+                st.error(f"❌ Could not read file `{uf.name}`: {e}")
 
-if uploaded_files:
-    for uf in uploaded_files:
-        try:
-            df = load_file(uf)
-            dfs_raw[uf.name] = df
-        except Exception as e:
-            st.error(f"❌ Could not read file `{uf.name}`: {e}")
+# --- Mode 2: Built-in sample files from ./data ---
+elif data_mode == "Built-in sample files (./data)":
+    samples = discover_sample_datasets("data")
+    if not samples:
+        st.sidebar.warning("No sample files found in ./data folder.")
+    else:
+        selected_samples = st.sidebar.multiselect(
+            "Select one or more sample files",
+            options=list(samples.keys()),
+        )
+        for fname in selected_samples:
+            path = samples[fname]
+            try:
+                df = load_local_sample(path)
+                dfs_raw[fname] = df
+            except Exception as e:
+                st.error(f"❌ Could not read sample `{fname}`: {e}")
 
+# --- Mode 3: Synthetic demo ---
+elif data_mode == "Synthetic demo":
+    # Provide 1–3 synthetic datasets to test append/merge logic
+    n_datasets = st.sidebar.slider("Number of synthetic datasets", 1, 3, 2)
+    for i in range(n_datasets):
+        df = generate_synthetic_dataset()
+        dfs_raw[f"synthetic_{i+1}.csv"] = df
+
+# If nothing loaded
 if not dfs_raw:
-    st.info("Upload files and/or enable synthetic data to begin.")
+    st.info("No datasets loaded yet. Adjust your data source on the left.")
     st.stop()
 
-st.subheader("1️⃣ Preview of Uploaded Datasets")
-for fname, df in dfs_raw.items():
-    with st.expander(f"File: {fname} (shape={df.shape})", expanded=False):
-        st.write("Columns:", list(df.columns))
-        st.dataframe(df.head(10))
+# ==========================
+# Tabs for nicer dashboard
+# ==========================
+tab_overview, tab_schema, tab_quality, tab_eda, tab_ml = st.tabs(
+    ["📋 Overview", "🧩 Schema & Matching", "✅ Data Quality", "📊 EDA", "🤖 ML Anomalies"]
+)
 
-# Normalize columns for internal use (but still show originals above)
-dfs_norm: Dict[str, pd.DataFrame] = {}
-col_maps: Dict[str, Dict[str, str]] = {}
-for fname, df in dfs_raw.items():
-    ndf, cmap = normalize_column_names(df)
-    dfs_norm[fname] = ndf
-    col_maps[fname] = cmap
+# --- OVERVIEW TAB ---
+with tab_overview:
+    st.subheader("1️⃣ Preview of Loaded Datasets")
 
-# Schema summary
-st.subheader("2️⃣ Schema Summary")
-schema_df = get_schema_summary(dfs_norm)
-st.dataframe(schema_df)
+    for fname, df in dfs_raw.items():
+        with st.expander(f"File: {fname} (shape={df.shape[0]} rows, {df.shape[1]} cols)", expanded=False):
+            st.write("Columns:", list(df.columns))
+            st.dataframe(df.head(10))
 
-# -----------------------------------------
-# 3️⃣ Column Similarity & Harmonization
-# -----------------------------------------
-st.subheader("3️⃣ Column Similarity & Harmonization")
+    # Normalize columns for internal use
+    dfs_norm: Dict[str, pd.DataFrame] = {}
+    col_maps: Dict[str, Dict[str, str]] = {}
+    for fname, df in dfs_raw.items():
+        ndf, cmap = normalize_column_names(df)
+        dfs_norm[fname] = ndf
+        col_maps[fname] = cmap
 
-# Initialize mappings
-harmonization_mappings: Dict[str, Dict[str, str]] = {fname: {} for fname in dfs_norm.keys()}
+    # Basic metrics (based on concatenated view just for counts)
+    tmp_concat = safely_append(dfs_norm)
+    total_rows = tmp_concat.shape[0]
+    total_cols = tmp_concat.shape[1]
+    total_missing = int(tmp_concat.isna().sum().sum())
 
-suggestions = suggest_similar_columns(dfs_norm)
-if suggestions:
-    st.write(
-        "The agent detected potentially similar variables across datasets. "
-        "Tick the ones that should be treated as the same variable."
-    )
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Total rows (all datasets combined)", f"{total_rows:,}")
+    m2.metric("Total columns (after normalization)", f"{total_cols:,}")
+    m3.metric("Total missing cells", f"{total_missing:,}")
 
-    # Use index-based unique keys to avoid duplicate widget keys
-    for idx, (f1, c1, c2) in enumerate(suggestions):
-        label = f"Treat `{c1}` in **{f1}** and `{c2}` in the other file as the same variable?"
-        if st.checkbox(label, key=f"suggest_{idx}"):
-            base = c1  # choose the first as canonical
-            # Map both columns to same base name
-            harmonization_mappings[f1][c1] = base
-            # Find which file the second col belongs to
-            for fname, df in dfs_norm.items():
-                if c2 in df.columns:
-                    harmonization_mappings[fname][c2] = base
-else:
-    st.write("No strong column similarity suggestions found. You can still harmonize manually.")
+# --- SCHEMA & MATCHING TAB ---
+with tab_schema:
+    st.subheader("2️⃣ Schema Summary")
+    schema_df = get_schema_summary(dfs_norm)
+    st.dataframe(schema_df)
 
-# Manual harmonization (always available)
-st.markdown("**Manual harmonization (optional)**")
-with st.expander("Map columns manually to a standard name", expanded=False):
-    for fname, df in dfs_norm.items():
-        st.markdown(f"**File: {fname}**")
-        for col in df.columns:
-            new_name = st.text_input(
-                f"Standard name for `{col}` in {fname} (leave blank to keep)",
-                value="",
-                key=f"manual_{fname}_{col}",
-            )
-            if new_name:
-                harmonization_mappings[fname][col] = new_name
+    st.markdown("### 3️⃣ Column Similarity & Harmonization")
 
-# Apply harmonization button
-if st.button("Apply harmonization & proceed to integration"):
-    st.session_state["harmonized_dfs"] = harmonize_columns(dfs_norm, harmonization_mappings)
-    st.success("Harmonization applied.")
-else:
-    if "harmonized_dfs" not in st.session_state:
-        st.session_state["harmonized_dfs"] = dfs_norm
+    harmonization_mappings: Dict[str, Dict[str, str]] = {fname: {} for fname in dfs_norm.keys()}
+    suggestions = suggest_similar_columns(dfs_norm)
+
+    if suggestions:
+        st.write(
+            "The agent detected potentially similar variables across datasets. "
+            "Tick the ones that should be treated as the same variable."
+        )
+        for idx, (f1, c1, c2) in enumerate(suggestions):
+            label = f"Treat `{c1}` in **{f1}** and `{c2}` in the other file as the same variable?"
+            if st.checkbox(label, key=f"suggest_{idx}"):
+                base = c1
+                harmonization_mappings[f1][c1] = base
+                for fname, df in dfs_norm.items():
+                    if c2 in df.columns:
+                        harmonization_mappings[fname][c2] = base
+    else:
+        st.write("No strong column similarity suggestions found. You can still harmonize manually.")
+
+    st.markdown("**Manual harmonization (optional)**")
+    with st.expander("Map columns manually to a standard name", expanded=False):
+        for fname, df in dfs_norm.items():
+            st.markdown(f"**File: {fname}**")
+            for col in df.columns:
+                new_name = st.text_input(
+                    f"Standard name for `{col}` in {fname} (leave blank to keep)",
+                    value="",
+                    key=f"manual_{fname}_{col}",
+                )
+                if new_name:
+                    harmonization_mappings[fname][col] = new_name
+
+    if st.button("Apply harmonization & prepare for integration"):
+        st.session_state["harmonized_dfs"] = harmonize_columns(dfs_norm, harmonization_mappings)
+        st.success("Harmonization applied.")
+    else:
+        if "harmonized_dfs" not in st.session_state:
+            st.session_state["harmonized_dfs"] = dfs_norm
 
 harmonized_dfs: Dict[str, pd.DataFrame] = st.session_state["harmonized_dfs"]
 
-# -----------------------------------------
-# 4️⃣ Choose Integration Mode
-# -----------------------------------------
-st.subheader("4️⃣ Choose Integration Mode")
+# --- DATA QUALITY TAB (includes integration step) ---
+with tab_quality:
+    st.subheader("4️⃣ Integration Mode")
 
-integration_mode = st.radio(
-    "How should the datasets be integrated?",
-    ["Append (stack rows)", "Merge (join on ID)"],
-)
+    integration_mode = st.radio(
+        "How should the datasets be integrated?",
+        ["Append (stack rows)", "Merge (join on ID)"],
+        key="integration_mode_radio",
+    )
 
-integrated_df = pd.DataFrame()
+    integrated_df = pd.DataFrame()
 
-if integration_mode == "Append (stack rows)":
-    if st.button("Run append integration"):
-        integrated_df = safely_append(harmonized_dfs)
-        st.success(f"Appended {len(harmonized_dfs)} datasets. Result shape: {integrated_df.shape}")
-else:
-    # Propose ID candidates
-    st.write("Select the key column for merging (e.g., `id`, `hhid`, `household_id`).")
-    candidate_ids = set()
-    for df in harmonized_dfs.values():
-        for c in df.columns:
-            if any(k in c.lower() for k in ["id", "hhid", "household"]):
-                candidate_ids.add(c)
-    candidate_ids = sorted(candidate_ids)
-    if not candidate_ids:
-        st.warning("No obvious ID columns found. You can still type one manually.")
-    key = st.text_input("Merge key column name:", value=candidate_ids[0] if candidate_ids else "")
-    merge_type = st.selectbox("Merge type", ["outer", "inner", "left", "right"])
+    if integration_mode == "Append (stack rows)":
+        if st.button("Run append integration", key="btn_append"):
+            integrated_df = safely_append(harmonized_dfs)
+            st.success(f"Appended {len(harmonized_dfs)} datasets. Result shape: {integrated_df.shape}")
+    else:
+        st.write("Select the key column for merging (e.g., `id`, `hhid`, `household_id`).")
+        candidate_ids = set()
+        for df in harmonized_dfs.values():
+            for c in df.columns:
+                if any(k in c.lower() for k in ["id", "hhid", "household"]):
+                    candidate_ids.add(c)
+        candidate_ids = sorted(candidate_ids)
+        if not candidate_ids:
+            st.warning("No obvious ID columns found. You can still type one manually.")
+        key = st.text_input("Merge key column name:", value=candidate_ids[0] if candidate_ids else "")
+        merge_type = st.selectbox("Merge type", ["outer", "inner", "left", "right"])
 
-    if st.button("Run merge integration"):
-        if not key:
-            st.error("Please specify a key column for merging.")
+        if st.button("Run merge integration", key="btn_merge"):
+            if not key:
+                st.error("Please specify a key column for merging.")
+            else:
+                integrated_df = safely_merge(harmonized_dfs, key=key, how=merge_type)
+                if not integrated_df.empty:
+                    st.success(f"Merged datasets on `{key}`. Result shape: {integrated_df.shape}")
+
+    if integrated_df.empty:
+        st.info("Run integration above to see data-quality diagnostics.")
+        st.stop()
+
+    st.markdown("### 5️⃣ Data-Quality Assessment")
+
+    with st.expander("Missing values summary", expanded=True):
+        miss_df = detect_missingness(integrated_df)
+        st.dataframe(miss_df)
+
+    with st.expander("Numeric extremes & impossible values", expanded=True):
+        ext_df = detect_numeric_extremes(integrated_df)
+        st.dataframe(ext_df)
+
+    with st.expander("Duplicate IDs", expanded=False):
+        candidate_ids = [c for c in integrated_df.columns if "id" in c.lower()]
+        if candidate_ids:
+            chosen_ids = st.multiselect(
+                "Select ID columns to check for duplicates", candidate_ids, default=candidate_ids
+            )
+            dup_info = detect_duplicates(integrated_df, chosen_ids)
+            if dup_info:
+                st.write(dup_info)
+            else:
+                st.write("No duplicates detected for selected ID columns.")
         else:
-            integrated_df = safely_merge(harmonized_dfs, key=key, how=merge_type)
-            if not integrated_df.empty:
-                st.success(f"Merged datasets on `{key}`. Result shape: {integrated_df.shape}")
+            st.write("No ID-like columns found for duplicate checks.")
 
-if integrated_df.empty:
-    st.stop()
-
-# =========================================
-# 5️⃣ Data-quality assessment & cleaning
-# =========================================
-
-st.subheader("5️⃣ Data-Quality Assessment")
-
-with st.expander("Missing values summary", expanded=True):
-    miss_df = detect_missingness(integrated_df)
-    st.dataframe(miss_df)
-
-with st.expander("Numeric extremes & impossible values", expanded=True):
-    ext_df = detect_numeric_extremes(integrated_df)
-    st.dataframe(ext_df)
-
-# Duplicates
-with st.expander("Duplicate IDs", expanded=False):
-    candidate_ids = [c for c in integrated_df.columns if "id" in c.lower()]
-    if candidate_ids:
-        chosen_ids = st.multiselect(
-            "Select ID columns to check for duplicates", candidate_ids, default=candidate_ids
-        )
-        dup_info = detect_duplicates(integrated_df, chosen_ids)
-        if dup_info:
-            st.write(dup_info)
+    with st.expander("Logical inconsistencies", expanded=False):
+        msgs = detect_logical_inconsistencies(integrated_df)
+        if msgs:
+            for m in msgs:
+                st.warning(m)
         else:
-            st.write("No duplicates detected for selected ID columns.")
+            st.write("No simple logical inconsistencies detected by current rules.")
+
+    st.markdown(
+        "Detected potential issues above. You can choose to run an **automatic cleaning pass** "
+        "or manually export and fix."
+    )
+
+    auto_clean = st.checkbox("Apply automatic cleaning (convert numerics, cap ages, trim extremes)")
+
+    if auto_clean:
+        df_clean = integrated_df.copy()
+        for col in df_clean.columns:
+            if df_clean[col].dtype == "object":
+                try:
+                    converted = pd.to_numeric(df_clean[col], errors="coerce")
+                    if converted.notna().sum() > 0:
+                        df_clean[col] = converted
+                except Exception:
+                    continue
+
+        for col in df_clean.columns:
+            if "age" in col.lower() and pd.api.types.is_numeric_dtype(df_clean[col]):
+                df_clean[col] = df_clean[col].clip(lower=0, upper=120)
+
+        for col in df_clean.columns:
+            if ("income" in col.lower() or "salary" in col.lower()) and pd.api.types.is_numeric_dtype(
+                df_clean[col]
+            ):
+                df_clean[col] = df_clean[col].clip(lower=0, upper=1_000_000)
+
+        cleaned_df = df_clean
     else:
-        st.write("No ID-like columns found for duplicate checks.")
+        cleaned_df = integrated_df
 
-# Logical inconsistencies
-with st.expander("Logical inconsistencies", expanded=False):
-    msgs = detect_logical_inconsistencies(integrated_df)
-    if msgs:
-        for m in msgs:
-            st.warning(m)
+    st.markdown("### 6️⃣ Cleaned / Integrated Dataset Preview")
+    st.dataframe(cleaned_df.head(100))
+    st.write("Shape:", cleaned_df.shape)
+
+    st.markdown("### 7️⃣ Download Cleaned Dataset")
+    csv_bytes = cleaned_df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        label="⬇️ Download cleaned data as CSV",
+        data=csv_bytes,
+        file_name="cleaned_integrated_data.csv",
+        mime="text/csv",
+        key="download_cleaned",
+    )
+
+# --- EDA TAB ---
+with tab_eda:
+    st.subheader("8️⃣ Exploratory Data Analysis (EDA)")
+    if "cleaned_df" in locals():
+        df_for_eda = cleaned_df
     else:
-        st.write("No simple logical inconsistencies detected by current rules.")
+        # fallback: attempt from session state or stop
+        st.info("Cleaned dataset not found. Run integration & cleaning first (Data Quality tab).")
+        st.stop()
 
-st.markdown(
-    "Detected potential issues above. You can choose to run an **automatic cleaning pass** or manually export and fix."
-)
+    show_basic_eda(df_for_eda)
 
-auto_clean = st.checkbox("Apply automatic cleaning (convert numerics, cap ages, trim extremes)")
+# --- ML ANOMALIES TAB ---
+with tab_ml:
+    st.subheader("9️⃣ Optional: ML-based Anomaly Detection")
 
-if auto_clean:
-    df_clean = integrated_df.copy()
+    if "cleaned_df" not in locals():
+        st.info("Cleaned dataset not found. Run integration & cleaning first (Data Quality tab).")
+        st.stop()
 
-    # Convert numeric-like object columns
-    for col in df_clean.columns:
-        if df_clean[col].dtype == "object":
-            try:
-                converted = pd.to_numeric(df_clean[col], errors="coerce")
-                # keep conversion only if it yields some non-NaN numeric values
-                if converted.notna().sum() > 0:
-                    df_clean[col] = converted
-            except Exception:
-                continue
+    run_ml = st.checkbox("Run Isolation Forest anomaly detection on numeric variables")
 
-    # Age capping
-    for col in df_clean.columns:
-        if "age" in col.lower() and pd.api.types.is_numeric_dtype(df_clean[col]):
-            df_clean[col] = df_clean[col].clip(lower=0, upper=120)
-
-    # Income capping
-    for col in df_clean.columns:
-        if ("income" in col.lower() or "salary" in col.lower()) and pd.api.types.is_numeric_dtype(
-            df_clean[col]
-        ):
-            df_clean[col] = df_clean[col].clip(lower=0, upper=1_000_000)
-
-    cleaned_df = df_clean
-else:
-    cleaned_df = integrated_df
-
-st.subheader("6️⃣ Cleaned / Integrated Dataset Preview")
-st.dataframe(cleaned_df.head(100))
-st.write("Shape:", cleaned_df.shape)
-
-# Download
-st.subheader("7️⃣ Download Cleaned Dataset")
-csv_bytes = cleaned_df.to_csv(index=False).encode("utf-8")
-st.download_button(
-    label="⬇️ Download cleaned data as CSV",
-    data=csv_bytes,
-    file_name="cleaned_integrated_data.csv",
-    mime="text/csv",
-)
-
-# =========================================
-# 8️⃣ Optional ML-based anomaly detection
-# =========================================
-
-st.subheader("8️⃣ Optional: ML-based Anomaly Detection")
-
-run_ml = st.checkbox("Run Isolation Forest anomaly detection on numeric variables")
-
-if run_ml:
-    contamination = st.slider("Anomaly proportion (contamination)", 0.01, 0.2, 0.05, 0.01)
-    anomaly_flag = run_isolation_forest(cleaned_df, contamination=contamination)
-    if anomaly_flag.sum() > 0:
-        st.warning(f"Isolation Forest flagged {int(anomaly_flag.sum())} potential anomalous records.")
-        st.dataframe(cleaned_df[anomaly_flag == 1].head(50))
-    else:
-        st.write("No anomalies flagged (or model not run).")
-
-# =========================================
-# 9️⃣ Exploratory Data Analysis (EDA)
-# =========================================
-
-st.subheader("9️⃣ Exploratory Data Analysis (EDA)")
-show_basic_eda(cleaned_df)
+    if run_ml:
+        contamination = st.slider("Anomaly proportion (contamination)", 0.01, 0.2, 0.05, 0.01)
+        anomaly_flag = run_isolation_forest(cleaned_df, contamination=contamination)
+        if anomaly_flag.sum() > 0:
+            st.warning(f"Isolation Forest flagged {int(anomaly_flag.sum())} potential anomalous records.")
+            st.dataframe(cleaned_df[anomaly_flag == 1].head(50))
+        else:
+            st.write("No anomalies flagged (or model not run).")
 
 st.markdown("---")
 st.caption(
     "All cleaning steps are transparent and reproducible. "
-    "Please review flagged issues before making final analytical decisions."
+    "Use the built-in samples, synthetic demo data, or your own files to test the agent."
 )
