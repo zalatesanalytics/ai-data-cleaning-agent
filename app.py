@@ -1,108 +1,21 @@
 """
-AI Data Cleaning & Integration Agent – Specification
+AI Data Cleaning & Integration Agent
 
-1. Core Responsibilities
+Core Responsibilities
+- Ingest multiple datasets (CSV, Excel, Stata, SPSS, JSON, pickle).
+- Detect and correct inconsistencies across numeric, categorical, and datetime variables.
+- Harmonize semantically similar variables across datasets (e.g., inc, income1, income2, household_income).
+- Support multi-dataset merging or appending.
+- Perform automatic cleaning by default, but keep the user in full control.
 
-Detect and correct inconsistencies across numeric, categorical, and datetime variables, including:
-- Impossible values (e.g., age < 0 or age > 120)
-- Logical contradictions (e.g., high income with extreme food insecurity)
-- Invalid category labels (e.g., “sexy”, “gendery”, “femal”, “educatoin”)
-
-Apply learned data-cleaning strategies using:
-- Mean / median imputation for numeric variables
-- Mode (most frequent) imputation for categorical variables
-- Rule-based corrections where appropriate
-- Transparent reporting of all cleaning actions
-
-Identify and harmonize semantically similar columns across datasets.
-Recognize variations in naming such as:
-- Income fields: inc, income, household_income, hhinc
-- Education fields: educ, education, head_education, edu_level
-- Gender fields: sex, gender, gend, mf, male_female
-
-Before merging these columns, ask the user to confirm whether similarly named variables
-should be treated as the same variable.
-
-Support multi-dataset merging by:
-- Standardizing column names
-- Aligning data types
-- Handling missing columns gracefully
-- Ensuring index uniqueness before concatenation
-
-2. Cleaning Logic & Behavior
-
-2.1 Validate Values
-- Flag ages < 15 as invalid for employment eligibility
-- Identify numeric outliers and conflicting entries
-- Detect categorical inconsistencies (typos, variants, mixed-case labels)
-
-2.2 Imputation Rules
-Use:
-- Mean → symmetric numeric distributions
-- Median → skewed numeric distributions
-- Most frequent → categorical values
-Always log what was imputed, why, and which strategy was used.
-
-2.3 Harmonization Rules
-- Normalize naming conventions to snake_case
-- Standardize categorical labels (Male/Female, Yes/No, etc.)
-- Convert similar variables into unified clean columns
-Automatically generate a mapping report showing:
-- Original variable names
-- Suggested standard names
-- User-approved merges
-
-3. User Interaction Rules
-
-You must always ask the user for confirmation when:
-- Two or more columns appear semantically similar
-- Potentially conflicting values require merging decisions
-- Imputing more than 20% missing values in any variable
-- Dropping, recoding, or replacing more than 5% of rows
-
-Always present the user with:
-- A summary of issues found
-- Suggested corrective actions
-- Cleaned previews before applying irreversible operations
-
-4. Visualization & EDA Requirements
-
-Generate all EDA outputs on a dedicated section in the app.
-Visual outputs should include:
-- Missing value heatmaps
-- Distribution plots for numeric variables
-- Bar charts for categorical variables
-- Outlier detection visuals (IQR boxplots, Z-score markers)
-- Correlation matrices (heatmap)
-- Clean vs. raw comparison charts
-
-5. Output Requirements
-
-After cleaning and harmonizing:
-- Produce a final cleaned DataFrame
-- Produce a detailed cleaning report including:
-  - Detected issues
-  - Imputation decisions
-  - Harmonized variable mappings
-  - Values corrected or removed
-- Provide the cleaned dataset for:
-  - Further EDA
-  - Download
-  - Subsequent ML modeling steps
-
-6. Safety, Transparency & Reliability
-
-- Never modify data silently
-- Never fabricate values
-- Always explain reasoning for cleaning actions
-- Preserve user control over all structural changes
-- Follow reproducible, rule-based cleaning processes
-
-Goal:
-Deliver a fully cleaned, harmonized, transparent dataset that is ready for high-quality analysis.
+Behavior
+- Automatic integration + cleaning is the default path.
+- After cleaning, the agent shows BEFORE vs AFTER diagnostics.
+- Then it asks the user if they are satisfied with the automatic cleaning.
+  - If YES → the cleaned dataset is used for EDA and download.
+  - If NO → the integrated but uncleaned dataset is used (manual cleaning mode).
 """
 
-import io
 import os
 import pickle
 from typing import Dict, List, Tuple
@@ -111,14 +24,15 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-# Optional imports for advanced formats / ML
+# Optional imports for SPSS
 try:
     import pyreadstat  # for .sav
 except ImportError:
     pyreadstat = None
 
+
 # =========================================
-# 1. Utility: synthetic example dataset
+# 1. Synthetic example dataset
 # =========================================
 
 def generate_synthetic_dataset(n: int = 300) -> pd.DataFrame:
@@ -126,7 +40,7 @@ def generate_synthetic_dataset(n: int = 300) -> pd.DataFrame:
     rng = np.random.default_rng(42)
     ages = rng.integers(-5, 150, size=n)  # includes impossible ages
     income = rng.normal(3000, 1500, size=n)
-    income[rng.choice(n, size=15, replace=False)] = -100  # negative income
+    income[rng.choice(n, size=15, replace=False)] = -100   # negative income
     income[rng.choice(n, size=5, replace=False)] = 2_000_000  # extreme income
 
     gender = rng.choice(["Male", "Female", "Other", None, "Unknown"], size=n)
@@ -196,7 +110,7 @@ def load_file(uploaded_file) -> pd.DataFrame:
 
 def normalize_column_names(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, str]]:
     """
-    Standardize column names to a consistent format, but keep original in a mapping.
+    Standardize column names to snake_case, but keep original names in a mapping.
     Returns (normalized_df, original_to_normalized_map).
     """
     df = df.copy()
@@ -240,12 +154,11 @@ def suggest_similar_columns(dfs: Dict[str, pd.DataFrame]) -> List[Tuple[str, str
     """
     Suggest potentially similar columns across files based on simple heuristics:
     - lower-case comparison without underscores
-    - synonym mapping for common variable names (age, sex/gender, id)
+    - simple synonyms for common variables
     Returns tuples of (file_name, col_in_that_file, matching_col_from_some_other_file).
     """
     import difflib
 
-    # Collect all columns with file names
     col_entries = []  # (file, col)
     for fname, df in dfs.items():
         for col in df.columns:
@@ -253,11 +166,12 @@ def suggest_similar_columns(dfs: Dict[str, pd.DataFrame]) -> List[Tuple[str, str
 
     suggestions: List[Tuple[str, str, str]] = []
     synonyms = {
-        "sex": ["gender", "sex", "sexe"],
-        "gender": ["gender, sex, sexe"],
-        "age": ["age", "age_years", "years", "age_yrs"],
+        "sex": ["sex", "gender", "sexe"],
+        "gender": ["gender", "sex", "sexe"],
+        "age": ["age", "age_years", "years", "age_yrs", "age_child", "age2"],
         "id": ["id", "hhid", "household_id", "respondent_id"],
-        "income": ["income", "income_monthly", "income1", "salary", "wage"],
+        "income": ["inc", "income", "income1", "income2", "income3", "income_monthly",
+                   "household_income", "hhinc"],
     }
 
     def base_name(c: str) -> str:
@@ -273,7 +187,6 @@ def suggest_similar_columns(dfs: Dict[str, pd.DataFrame]) -> List[Tuple[str, str
             b1, b2 = base_name(c1), base_name(c2)
             ratio = difflib.SequenceMatcher(None, b1, b2).ratio()
 
-            # synonym-based
             syn_match = False
             for _, variants in synonyms.items():
                 if c1.lower() in variants and c2.lower() in variants:
@@ -283,7 +196,6 @@ def suggest_similar_columns(dfs: Dict[str, pd.DataFrame]) -> List[Tuple[str, str
             if syn_match or ratio > 0.8:
                 suggestions.append((f1, c1, c2))
 
-    # Deduplicate suggestions
     unique_suggestions = list(dict.fromkeys(suggestions))
     return unique_suggestions
 
@@ -296,23 +208,18 @@ PLACEHOLDER_VALUES = {"?", "NA", "N/A", "999", "9999", "Unknown", "unknown"}
 
 
 def basic_cleaning(df: pd.DataFrame) -> pd.DataFrame:
-    """Basic structural cleaning: strip strings, remove fully empty rows/cols, reset index."""
+    """Basic structural cleaning: strip strings, remove empty rows/cols, reset index."""
     df = df.copy()
 
-    # Strip whitespace in object columns
     for col in df.select_dtypes(include=["object"]).columns:
         df[col] = df[col].astype(str).str.strip()
-        # Replace placeholder values with NaN
         df[col] = df[col].replace(list(PLACEHOLDER_VALUES), np.nan)
 
-    # Drop fully empty rows/columns
     df = df.dropna(how="all")
     df = df.dropna(axis=1, how="all")
 
-    # Reset index & ensure unique columns
     df = df.reset_index(drop=True)
     df = df.loc[:, ~df.columns.duplicated()]
-
     return df
 
 
@@ -330,10 +237,7 @@ def detect_missingness(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def detect_numeric_extremes(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Flag potential extreme values for numeric columns.
-    Uses generic IQR + some domain rules for age/income-like columns.
-    """
+    """Flag potential extreme values for numeric columns."""
     rows = []
     num_df = df.select_dtypes(include=[np.number])
     for col in num_df.columns:
@@ -384,16 +288,15 @@ def detect_duplicates(df: pd.DataFrame, id_cols: List[str]) -> Dict[str, int]:
 
 def detect_logical_inconsistencies(df: pd.DataFrame) -> List[str]:
     """
-    Detect simple logical inconsistencies such as:
+    Detect simple logical inconsistencies:
     - adolescent age and higher education
     - employed == "Yes" and income <= 0 or missing
     """
     messages: List[str] = []
 
-    # ---------- Find an age column ----------
+    # Age
     age_col = None
     age_series = None
-
     for c in df.columns:
         if "age" in c.lower():
             s = pd.to_numeric(df[c], errors="coerce")
@@ -402,17 +305,15 @@ def detect_logical_inconsistencies(df: pd.DataFrame) -> List[str]:
                 age_series = s
                 break
 
-    # ---------- Find an education column ----------
+    # Education
     edu_col = None
     edu_keywords = ["educ", "school", "grade", "class", "level"]
-
     for c in df.columns:
         name = c.lower()
         if any(k in name for k in edu_keywords):
             edu_col = c
             break
 
-    # ---------- Rule 1: Adolescent age with higher education ----------
     if age_col is not None and edu_col is not None:
         edu_series = df[edu_col].astype(str).str.lower()
         higher_terms = [
@@ -425,10 +326,8 @@ def detect_logical_inconsistencies(df: pd.DataFrame) -> List[str]:
             "diploma",
             "degree",
         ]
-
         higher_mask = edu_series.str.contains("|".join(higher_terms), na=False)
         young_mask = (age_series >= 5) & (age_series < 18)
-
         count = int((young_mask & higher_mask).sum())
         if count > 0:
             messages.append(
@@ -436,10 +335,9 @@ def detect_logical_inconsistencies(df: pd.DataFrame) -> List[str]:
                 f"(column '{edu_col}')."
             )
 
-    # ---------- Find employment and income columns ----------
+    # Employment & income
     emp_col = None
     income_col = None
-
     for c in df.columns:
         lc = c.lower()
         if emp_col is None and lc in {"employed", "employment_status", "employment", "work_status"}:
@@ -447,14 +345,11 @@ def detect_logical_inconsistencies(df: pd.DataFrame) -> List[str]:
         if income_col is None and any(k in lc for k in ["income", "salary", "wage", "earning", "pay"]):
             income_col = c
 
-    # ---------- Rule 2: Employed == Yes but income <= 0 or missing ----------
     if emp_col is not None and income_col is not None:
         emp_series = df[emp_col].astype(str).str.lower()
         inc_series = pd.to_numeric(df[income_col], errors="coerce")
-
         with np.errstate(invalid="ignore"):
             mask = (emp_series == "yes") & ((inc_series <= 0) | inc_series.isna())
-
         count = int(mask.sum())
         if count > 0:
             messages.append(
@@ -466,12 +361,9 @@ def detect_logical_inconsistencies(df: pd.DataFrame) -> List[str]:
 
 
 def auto_fix_age_education_inconsistencies(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Fix cases where age is in 5–17 band but education is unrealistically high.
-    """
+    """Fix cases where age is in 5–17 band but education is unrealistically high."""
     df = df.copy()
 
-    # Find age column
     age_col = None
     age_series = None
     for c in df.columns:
@@ -482,7 +374,6 @@ def auto_fix_age_education_inconsistencies(df: pd.DataFrame) -> pd.DataFrame:
                 age_series = s
                 break
 
-    # Find education column
     edu_col = None
     edu_keywords = ["educ", "school", "grade", "class", "level"]
     for c in df.columns:
@@ -495,7 +386,6 @@ def auto_fix_age_education_inconsistencies(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     edu_series = df[edu_col].astype(str)
-
     band_mask = (age_series >= 5) & (age_series < 18)
     higher_terms = [
         "university",
@@ -510,7 +400,6 @@ def auto_fix_age_education_inconsistencies(df: pd.DataFrame) -> pd.DataFrame:
     higher_mask = edu_series.str.lower().str.contains("|".join(higher_terms), na=False)
 
     inconsistent_mask = band_mask & higher_mask
-
     if inconsistent_mask.sum() == 0:
         return df
 
@@ -529,10 +418,7 @@ def auto_fix_age_education_inconsistencies(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def auto_fix_employment_income_inconsistencies(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    For employed='Yes' with income <=0 or missing, impute income using median
-    positive income among employed.
-    """
+    """For employed='Yes' with income <=0 or missing, impute income using median income among employed."""
     df = df.copy()
 
     emp_col = None
@@ -556,25 +442,22 @@ def auto_fix_employment_income_inconsistencies(df: pd.DataFrame) -> pd.DataFrame
         return df
 
     median_income = inc_series[valid_income_mask].median()
-
     fix_mask = employed_mask & ((inc_series <= 0) | inc_series.isna())
     df.loc[fix_mask, income_col] = median_income
-
     return df
 
 
 def strong_numeric_cleaning(df: pd.DataFrame) -> pd.DataFrame:
     """
     Strong numeric cleaning:
-    - Converts numeric-like text to numeric.
-    - Age-like: remove <0 or >120, impute median, clip [0,120].
-    - Income-like: remove <0 or >1e6, impute median, clip [0,1e6].
-    - Other numeric: trim extreme outliers, impute median.
+    - Convert numeric-like text to numeric.
+    - Age-like: 0–120, impute median, clip.
+    - Income-like: 0–1e6, impute median, clip.
+    - Others: trim extreme outliers, impute median.
     """
     df = df.copy()
 
     for col in df.columns:
-        # Try to convert object to numeric where possible
         if df[col].dtype == "object":
             converted = pd.to_numeric(df[col], errors="coerce")
             if converted.notna().sum() > 0:
@@ -621,7 +504,7 @@ def strong_numeric_cleaning(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def auto_impute_categorical_missing(df: pd.DataFrame) -> pd.DataFrame:
-    """Impute missing categorical values using the mode of each column."""
+    """Impute missing categorical values using the mode."""
     df = df.copy()
     cat_cols = df.select_dtypes(include=["object", "category"]).columns
     for col in cat_cols:
@@ -657,16 +540,66 @@ def run_isolation_forest(df: pd.DataFrame, contamination: float = 0.05) -> pd.Se
 
 
 # =========================================
-# 6. Integration: append vs merge
+# 6. Semantic variable collapsing (income, age, etc.)
+# =========================================
+
+SEMANTIC_GROUPS = {
+    "income": [
+        "inc", "income", "income1", "income2", "income3",
+        "income_monthly", "hhinc", "household_income", "hh_income", "householdinc",
+    ],
+    "age": [
+        "age", "age_yrs", "age_years", "age2", "age_child", "child_age",
+    ],
+}
+
+
+def collapse_semantic_groups(df: pd.DataFrame,
+                             groups: Dict[str, List[str]] = SEMANTIC_GROUPS
+                             ) -> pd.DataFrame:
+    """
+    For each semantic group (e.g., income), find all related columns and
+    collapse them into a single canonical column (first non-null per row),
+    then drop the redundant columns.
+    """
+    df = df.copy()
+
+    for canonical, patterns in groups.items():
+        fam_cols = []
+        for col in df.columns:
+            lc = col.lower()
+            if any(p in lc for p in patterns):
+                fam_cols.append(col)
+
+        if not fam_cols:
+            continue
+
+        if canonical in fam_cols:
+            base_col = canonical
+            other_cols = [c for c in fam_cols if c != canonical]
+            if other_cols:
+                df[base_col] = df[[base_col] + other_cols].bfill(axis=1).iloc[:, 0]
+        else:
+            df[canonical] = df[fam_cols].bfill(axis=1).iloc[:, 0]
+            base_col = canonical
+            other_cols = fam_cols
+
+        cols_to_drop = [c for c in fam_cols if c != base_col]
+        df = df.drop(columns=cols_to_drop)
+
+    df = df.loc[:, ~df.columns.duplicated()]
+    return df
+
+
+# =========================================
+# 7. Integration: append vs merge
 # =========================================
 
 def harmonize_columns(
     dfs: Dict[str, pd.DataFrame],
     mappings: Dict[str, Dict[str, str]],
 ) -> Dict[str, pd.DataFrame]:
-    """
-    Apply user-defined mappings: mappings[file][old_col] = new_col.
-    """
+    """Apply user-defined mappings: mappings[file][old_col] = new_col."""
     out: Dict[str, pd.DataFrame] = {}
     for fname, df in dfs.items():
         df = df.copy()
@@ -678,9 +611,7 @@ def harmonize_columns(
 
 
 def safely_append(dfs: Dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """
-    Vertically append multiple DataFrames with safety checks.
-    """
+    """Vertically append multiple DataFrames with basic cleaning."""
     cleaned = []
     for df in dfs.values():
         df = basic_cleaning(df)
@@ -718,7 +649,7 @@ def safely_merge(dfs: Dict[str, pd.DataFrame], key: str, how: str = "outer") -> 
 
 
 # =========================================
-# 7. EDA helpers
+# 8. EDA helpers
 # =========================================
 
 def show_basic_eda(df: pd.DataFrame):
@@ -803,7 +734,7 @@ def generate_narrative_from_eda(df: pd.DataFrame, title: str = "EDA summary") ->
 
 
 # =========================================
-# 8. Streamlit App
+# 9. Streamlit App
 # =========================================
 
 st.set_page_config(page_title="AI Data Cleaning & Integration Agent", layout="wide")
@@ -812,17 +743,17 @@ st.title("🧹 AI Data-Cleaning, Integration & Analysis Agent")
 
 st.write(
     """
-This agent ingests multiple datasets (CSV, Excel, Stata, SPSS, JSON, pickle),
-detects schema similarities, diagnoses data-quality issues, supports append/merge
-integration, and prepares clean, analysis-ready data with EDA and optional
-ML-based anomaly detection.
+This agent ingests multiple datasets, detects schema similarities, automatically
+integrates and cleans them by default, and then asks you whether you are satisfied
+with the result. If not, you can keep the integrated but uncleaned data for manual
+cleaning and custom analysis.
 """
 )
 
 # --- Sidebar options ---
 st.sidebar.header("Data & Options")
 
-use_synthetic = st.sidebar.checkbox("Use synthetic example dataset", value=False)
+use_synthetic = st.sidebar.checkbox("Use synthetic example dataset (test mode)", value=False)
 
 uploaded_files = st.sidebar.file_uploader(
     "Upload one or more datasets",
@@ -830,6 +761,7 @@ uploaded_files = st.sidebar.file_uploader(
     type=["csv", "xlsx", "xls", "dta", "sav", "json", "pkl", "pickle", "tsv", "txt"],
 )
 
+# Collect raw dfs
 dfs_raw: Dict[str, pd.DataFrame] = {}
 
 if use_synthetic:
@@ -847,13 +779,14 @@ if not dfs_raw:
     st.info("Use the sidebar to upload files and/or enable synthetic data to begin.")
     st.stop()
 
+# 1️⃣ Preview raw datasets
 st.subheader("1️⃣ Preview of Uploaded Datasets")
 for fname, df in dfs_raw.items():
     with st.expander(f"File: {fname} (shape={df.shape})", expanded=False):
         st.write("Columns:", list(df.columns))
         st.dataframe(df.head(10))
 
-# Normalize columns for internal use
+# Normalize column names
 dfs_norm: Dict[str, pd.DataFrame] = {}
 col_maps: Dict[str, Dict[str, str]] = {}
 for fname, df in dfs_raw.items():
@@ -861,14 +794,12 @@ for fname, df in dfs_raw.items():
     dfs_norm[fname] = ndf
     col_maps[fname] = cmap
 
-# Schema summary
-st.subheader("2️⃣ Schema Summary")
+# 2️⃣ Schema summary
+st.subheader("2️⃣ Schema Summary (normalized names)")
 schema_df = get_schema_summary(dfs_norm)
 st.dataframe(schema_df)
 
-# -----------------------------------------
-# 3️⃣ Column Similarity & Harmonization
-# -----------------------------------------
+# 3️⃣ Column similarity & harmonization
 st.subheader("3️⃣ Column Similarity & Harmonization")
 
 harmonization_mappings: Dict[str, Dict[str, str]] = {fname: {} for fname in dfs_norm.keys()}
@@ -877,17 +808,17 @@ suggestions = suggest_similar_columns(dfs_norm)
 if suggestions:
     st.write(
         "The agent suggests that some variables are likely the **same concept** across datasets.\n"
-        "By default, they will be harmonized to a common name and then appended as a single column.\n"
-        "✅ **Check the box only if they are actually unrelated and should NOT be harmonized.**"
+        "By default, they will be harmonized to a common name when you approve.\n"
+        "✅ Only mark them as unrelated if you are sure they should remain separate."
     )
 
     for idx, (f1, c1, c2) in enumerate(suggestions):
         st.markdown(f"- Suggested match: `{c1}` in **{f1}** ↔ `{c2}` in another file")
-        not_related = st.checkbox(
-            "These are unrelated – keep them separate",
+        keep_separate = st.checkbox(
+            "Keep these separate (do NOT harmonize)",
             key=f"suggest_unrelated_{idx}",
         )
-        if not not_related:
+        if not keep_separate:
             base = c1
             harmonization_mappings[f1][c1] = base
             for fname, df in dfs_norm.items():
@@ -909,7 +840,7 @@ with st.expander("Map columns manually to a standard name", expanded=False):
             if new_name:
                 harmonization_mappings[fname][col] = new_name
 
-if st.button("Apply harmonization & proceed to integration"):
+if st.button("Apply harmonization"):
     st.session_state["harmonized_dfs"] = harmonize_columns(dfs_norm, harmonization_mappings)
     st.success("Harmonization applied.")
 else:
@@ -918,171 +849,156 @@ else:
 
 harmonized_dfs: Dict[str, pd.DataFrame] = st.session_state["harmonized_dfs"]
 
-# -----------------------------------------
-# 4️⃣ Choose Integration Mode
-# -----------------------------------------
-st.subheader("4️⃣ Choose Integration Mode")
+# 4️⃣ Integration (append/merge) + automatic cleaning (default)
+st.subheader("4️⃣ Integrate & Auto-Clean (default)")
 
 integration_mode = st.radio(
-    "How should the datasets be integrated?",
+    "Integration mode",
     ["Append (stack rows)", "Merge (join on ID)"],
+    index=0,  # default to Append
 )
 
-integrated_df = pd.DataFrame()
+integrate_and_clean = st.button("Run integration + automatic cleaning")
 
-if integration_mode == "Append (stack rows)":
-    if st.button("Run append integration"):
+if integrate_and_clean:
+    # Integration
+    if integration_mode == "Append (stack rows)":
         integrated_df = safely_append(harmonized_dfs)
+        integrated_df = collapse_semantic_groups(integrated_df)
         st.success(f"Appended {len(harmonized_dfs)} datasets. Result shape: {integrated_df.shape}")
-else:
-    st.write("Select the key column for merging (e.g., `id`, `hhid`, `household_id`).")
-    candidate_ids = set()
-    for df in harmonized_dfs.values():
-        for c in df.columns:
-            if any(k in c.lower() for k in ["id", "hhid", "household"]):
-                candidate_ids.add(c)
-    candidate_ids = sorted(candidate_ids)
-    if not candidate_ids:
-        st.warning("No obvious ID columns found. You can still type one manually.")
-    key = st.text_input("Merge key column name:", value=candidate_ids[0] if candidate_ids else "")
-    merge_type = st.selectbox("Merge type", ["outer", "inner", "left", "right"])
+    else:
+        st.write("Select the key column for merging (e.g., `id`, `hhid`, `household_id`).")
+        candidate_ids = set()
+        for df in harmonized_dfs.values():
+            for c in df.columns:
+                if any(k in c.lower() for k in ["id", "hhid", "household"]):
+                    candidate_ids.add(c)
+        candidate_ids = sorted(candidate_ids)
+        if not candidate_ids:
+            st.warning("No obvious ID columns found. Type the key manually if you know it.")
+        key = st.text_input("Merge key column name:", value=candidate_ids[0] if candidate_ids else "")
+        merge_type = st.selectbox("Merge type", ["outer", "inner", "left", "right"], index=0)
 
-    if st.button("Run merge integration"):
         if not key:
             st.error("Please specify a key column for merging.")
-        else:
-            integrated_df = safely_merge(harmonized_dfs, key=key, how=merge_type)
-            if not integrated_df.empty:
-                st.success(f"Merged datasets on `{key}`. Result shape: {integrated_df.shape}")
+            st.stop()
 
-if integrated_df.empty:
+        integrated_df = safely_merge(harmonized_dfs, key=key, how=merge_type)
+        if integrated_df.empty:
+            st.stop()
+        integrated_df = collapse_semantic_groups(integrated_df)
+        st.success(f"Merged datasets on `{key}`. Result shape: {integrated_df.shape}")
+
+    # Save integrated df
+    st.session_state["integrated_df"] = integrated_df
+
+    # Automatic cleaning (DEFAULT PATH)
+    df_clean = integrated_df.copy()
+    df_clean = strong_numeric_cleaning(df_clean)
+    df_clean = auto_impute_categorical_missing(df_clean)
+    df_clean = auto_fix_age_education_inconsistencies(df_clean)
+    df_clean = auto_fix_employment_income_inconsistencies(df_clean)
+
+    st.session_state["cleaned_df_auto"] = df_clean
+
+# If integration not yet run, stop here
+if "integrated_df" not in st.session_state or "cleaned_df_auto" not in st.session_state:
+    st.info("Click 'Run integration + automatic cleaning' to continue.")
     st.stop()
 
-# =========================================
-# 5️⃣ Data-quality assessment & cleaning
-# =========================================
+integrated_df = st.session_state["integrated_df"]
+cleaned_df_auto = st.session_state["cleaned_df_auto"]
 
-st.subheader("5️⃣ Data-Quality Assessment – BEFORE Cleaning")
+# 5️⃣ Data-quality assessment BEFORE vs AFTER
+st.subheader("5️⃣ Data-Quality Assessment – BEFORE vs AFTER Automatic Cleaning")
 
 miss_before = detect_missingness(integrated_df)
+miss_after = detect_missingness(cleaned_df_auto)
 ext_before = detect_numeric_extremes(integrated_df)
+ext_after = detect_numeric_extremes(cleaned_df_auto)
 logical_msgs_before = detect_logical_inconsistencies(integrated_df)
+logical_msgs_after = detect_logical_inconsistencies(cleaned_df_auto)
 
-with st.expander("Missing values summary (before cleaning)", expanded=True):
+col1, col2 = st.columns(2)
+with col1:
+    st.markdown("**Missing values – BEFORE cleaning**")
     st.dataframe(miss_before)
+with col2:
+    st.markdown("**Missing values – AFTER cleaning**")
+    st.dataframe(miss_after)
 
-with st.expander("Numeric extremes & impossible values (before cleaning)", expanded=True):
-    st.dataframe(ext_before)
+st.markdown("**Numeric extremes & impossible values – BEFORE cleaning**")
+st.dataframe(ext_before)
 
-with st.expander("Duplicate IDs (before cleaning)", expanded=False):
-    candidate_ids = [c for c in integrated_df.columns if "id" in c.lower()]
-    if candidate_ids:
-        chosen_ids = st.multiselect(
-            "Select ID columns to check for duplicates", candidate_ids, default=candidate_ids
-        )
-        dup_info_before = detect_duplicates(integrated_df, chosen_ids)
-        if dup_info_before:
-            st.write(dup_info_before)
-        else:
-            st.write("No duplicates detected for selected ID columns.")
-    else:
-        st.write("No ID-like columns found for duplicate checks.")
+st.markdown("**Numeric extremes & impossible values – AFTER cleaning**")
+st.dataframe(ext_after)
 
-with st.expander("Logical inconsistencies (before cleaning)", expanded=False):
+with st.expander("Logical inconsistencies – BEFORE cleaning", expanded=False):
     if logical_msgs_before:
         for m in logical_msgs_before:
             st.warning(m)
     else:
         st.write("No simple logical inconsistencies detected by current rules.")
 
-st.markdown(
-    """
-**Summary:** These are the potential data-cleaning issues detected (missing data, outliers, duplicates, inconsistencies).  
-Now choose whether you want the agent to apply automatic corrections or keep everything manual.
-"""
-)
-
-cleaning_mode = st.radio(
-    "Choose data-cleaning mode",
-    [
-        "Manual review only (no automatic fixes)",
-        "Automatic cleaning (strong numeric & categorical cleaning + logical fixes)",
-    ],
-)
-
-if cleaning_mode.startswith("Automatic"):
-    df_clean = integrated_df.copy()
-    df_clean = strong_numeric_cleaning(df_clean)
-    df_clean = auto_impute_categorical_missing(df_clean)
-    df_clean = auto_fix_age_education_inconsistencies(df_clean)
-    df_clean = auto_fix_employment_income_inconsistencies(df_clean)
-    cleaned_df = df_clean
-else:
-    cleaned_df = integrated_df
-
-st.subheader("6️⃣ Data-quality Assessment – AFTER Cleaning")
-
-miss_after = detect_missingness(cleaned_df)
-ext_after = detect_numeric_extremes(cleaned_df)
-logical_msgs_after = detect_logical_inconsistencies(cleaned_df)
-
-col1, col2 = st.columns(2)
-with col1:
-    st.markdown("**Missing values – before cleaning**")
-    st.dataframe(miss_before)
-with col2:
-    st.markdown("**Missing values – after cleaning**")
-    st.dataframe(miss_after)
-
-st.markdown("**Numeric extremes & impossible values – after cleaning**")
-st.dataframe(ext_after)
-
-with st.expander("Logical inconsistencies – after cleaning", expanded=False):
+with st.expander("Logical inconsistencies – AFTER cleaning", expanded=False):
     if logical_msgs_after:
         for m in logical_msgs_after:
             st.warning(m)
     else:
         st.write("No simple logical inconsistencies detected after cleaning rules.")
 
-st.subheader("7️⃣ Cleaned / Integrated Dataset Preview")
-st.dataframe(cleaned_df.head(100))
-st.write("Shape:", cleaned_df.shape)
+# 6️⃣ Ask user if they accept automatic cleaning
+st.subheader("6️⃣ Do you accept the automatic cleaning result?")
 
-# Download
-st.subheader("8️⃣ Download Cleaned Dataset")
-csv_bytes = cleaned_df.to_csv(index=False).encode("utf-8")
+choice = st.radio(
+    "Choose which dataset you want to continue with:",
+    [
+        "✅ Yes – use the automatically cleaned dataset",
+        "❌ No – keep the integrated but uncleaned dataset (manual cleaning)",
+    ],
+    index=0,
+)
+
+if choice.startswith("✅"):
+    final_df = cleaned_df_auto
+    st.success("Using AUTOMATICALLY CLEANED dataset for EDA and download.")
+else:
+    final_df = integrated_df
+    st.warning("Using INTEGRATED BUT UNCLEANED dataset. You can clean it manually or offline.")
+
+st.subheader("7️⃣ Final Dataset Preview")
+st.dataframe(final_df.head(100))
+st.write("Shape:", final_df.shape)
+
+# Download final dataset
+st.subheader("8️⃣ Download Final Dataset")
+csv_bytes = final_df.to_csv(index=False).encode("utf-8")
 st.download_button(
-    label="⬇️ Download cleaned data as CSV",
+    label="⬇️ Download final dataset as CSV",
     data=csv_bytes,
-    file_name="cleaned_integrated_data.csv",
+    file_name="final_data_clean_or_raw.csv",
     mime="text/csv",
 )
 
-# =========================================
 # 9️⃣ Optional ML-based anomaly detection
-# =========================================
-
-st.subheader("9️⃣ Optional: ML-based Anomaly Detection")
+st.subheader("9️⃣ Optional: ML-based Anomaly Detection (Isolation Forest)")
 
 run_ml = st.checkbox("Run Isolation Forest anomaly detection on numeric variables")
 
 if run_ml:
     contamination = st.slider("Anomaly proportion (contamination)", 0.01, 0.2, 0.05, 0.01)
-    anomaly_flag = run_isolation_forest(cleaned_df, contamination=contamination)
+    anomaly_flag = run_isolation_forest(final_df, contamination=contamination)
     if anomaly_flag.sum() > 0:
         st.warning(f"Isolation Forest flagged {int(anomaly_flag.sum())} potential anomalous records.")
-        st.dataframe(cleaned_df[anomaly_flag == 1].head(50))
+        st.dataframe(final_df[anomaly_flag == 1].head(50))
     else:
         st.write("No anomalies flagged (or model not run).")
 
-# =========================================
-# 🔟 Exploratory Data Analysis (EDA)
-# =========================================
+# 🔟 EDA on final dataset
+st.subheader("🔟 Exploratory Data Analysis (EDA) on Final Dataset")
 
-st.subheader("🔟 Exploratory Data Analysis (EDA)")
-
-numeric_cols_all = list(cleaned_df.select_dtypes(include=[np.number]).columns)
-cat_cols_all = list(cleaned_df.select_dtypes(include=["object", "category"]).columns)
+numeric_cols_all = list(final_df.select_dtypes(include=[np.number]).columns)
+cat_cols_all = list(final_df.select_dtypes(include=["object", "category"]).columns)
 
 if not numeric_cols_all and not cat_cols_all:
     st.write("No numeric or categorical variables available for EDA.")
@@ -1117,7 +1033,7 @@ else:
     if not selected_cols:
         st.info("No variables selected for EDA.")
     else:
-        df_for_eda = cleaned_df[selected_cols].copy()
+        df_for_eda = final_df[selected_cols].copy()
         tab_results, tab_narrative = st.tabs(["📊 EDA Results", "📝 Narrative summary"])
         with tab_results:
             show_basic_eda(df_for_eda)
@@ -1127,6 +1043,7 @@ else:
 
 st.markdown("---")
 st.caption(
-    "All cleaning steps are transparent and reproducible. "
-    "Please review flagged issues and narratives before making final analytical decisions."
+    "Automatic cleaning is applied by default, but you always remain in control. "
+    "If you are not satisfied with the result, keep the integrated raw data and "
+    "apply your own cleaning rules."
 )
