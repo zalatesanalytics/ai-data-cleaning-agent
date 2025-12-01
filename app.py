@@ -102,7 +102,12 @@ You can review this suggestion above. A more advanced version could allow manual
 # Apply canonical mapping to every dataframe
 harmonized_dfs = []
 for df in dataframes:
+    # Rename columns using canonical mapping
     df_renamed = df.rename(columns=mapping)
+
+    # Ensure column names are unique (drop duplicated columns, keep first)
+    df_renamed = df_renamed.loc[:, ~df_renamed.columns.duplicated()]
+
     harmonized_dfs.append(df_renamed)
 
 # ---------- Combine datasets (append) ----------
