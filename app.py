@@ -182,7 +182,9 @@ def suggest_similar_columns(dfs: Dict[str, pd.DataFrame]) -> List[Tuple[str, str
             if syn_match or ratio > 0.8:
                 suggestions.append((f1, c1, c2))
 
-    return suggestions
+    # Deduplicate suggestions
+    unique_suggestions = list(dict.fromkeys(suggestions))
+    return unique_suggestions
 
 
 # =========================================
@@ -527,9 +529,10 @@ if suggestions:
         "Tick the ones that should be treated as the same variable."
     )
 
-    for (f1, c1, c2) in suggestions:
+    # Use index-based unique keys to avoid duplicate widget keys
+    for idx, (f1, c1, c2) in enumerate(suggestions):
         label = f"Treat `{c1}` in **{f1}** and `{c2}` in the other file as the same variable?"
-        if st.checkbox(label, key=f"{f1}_{c1}_{c2}"):
+        if st.checkbox(label, key=f"suggest_{idx}"):
             base = c1  # choose the first as canonical
             # Map both columns to same base name
             harmonization_mappings[f1][c1] = base
