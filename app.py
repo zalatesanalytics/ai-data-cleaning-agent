@@ -1,200 +1,203 @@
-import streamlit as st
-import pandas as pd
+import io
+from typing import List, Dict
+
 import numpy as np
-import os
+import pandas as pd
+import streamlit as st
 
-from utils.schema_matcher import suggest_column_groups, build_canonical_mapping
-from utils.cleaning import basic_cleaning_report, apply_basic_cleaning
-from utils.eda import generate_eda_summary
+# ---------------------------------------------
+# Helper functions
+# ---------------------------------------------
 
-st.set_page_config(
-    page_title="AI Data-Cleaning & Integration Agent",
-    layout="wide"
-)
 
-st.title("🧹 AI Data-Cleaning & Integration Agent")
-
-st.markdown(
-    """
-This agent helps you:
-- Upload **multiple datasets** (CSV/Excel for now)
-- Detect similar column names (e.g., `sex` vs `gender`, `Age` vs `age`)
-- Harmonize schemas
-- Apply basic data cleaning
-- Run simple EDA
-
-More formats (STATA, SPSS, etc.) can be added later.
-"""
-)
-
-# ---------- Helper functions ----------
-
-def load_file(uploaded_file):
+def load_file(uploaded_file) -> pd.DataFrame:
+    """Load a file into a pandas DataFrame based on extension."""
     name = uploaded_file.name.lower()
     if name.endswith(".csv"):
         return pd.read_csv(uploaded_file)
-    elif name.endswith(".xlsx") or name.endswith(".xls"):
+    if name.endswith(".xlsx") or name.endswith(".xls"):
         return pd.read_excel(uploaded_file)
-    else:
-        st.warning(f"Unsupported file type for {uploaded_file.name}. Only CSV/Excel in this demo.")
-        return None
+    if name.endswith(".json"):
+        return pd.read_json(uploaded_file)
+    if name.endswith(".tsv") or name.endswith(".txt"):
+        return pd.read_csv(uploaded_file, sep="\t")
+    # Fallback: try CSV
+    return pd.read_csv(uploaded_file)
 
-# ---------- Data upload section ----------
 
-st.sidebar.header("1. Upload datasets")
-uploaded_files = st.sidebar.file_uploader(
-    "Upload one or more datasets",
-    type=["csv", "xlsx", "xls"],
-    accept_multiple_files=True
-)
-
-use_sample = st.sidebar.checkbox("Use sample synthetic data (demo)", value=False)
-
-dataframes = []
-dataset_names = []
-
-if use_sample:
-    st.sidebar.success("Using sample synthetic datasets from /data")
-    for fname in ["sample_dataset1.csv", "sample_dataset2.csv", "sample_dataset3.csv"]:
-        fpath = os.path.join("data", fname)
-        if os.path.exists(fpath):
-            df = pd.read_csv(fpath)
-            dataframes.append(df)
-            dataset_names.append(fname)
-        else:
-            st.sidebar.warning(f"Sample file not found: {fpath}")
-elif uploaded_files:
-    for f in uploaded_files:
-        df = load_file(f)
-        if df is not None:
-            dataframes.append(df)
-            dataset_names.append(f.name)
-
-if not dataframes:
-    st.info("Upload at least one dataset from the sidebar or enable sample synthetic data.")
-    st.stop()
-
-st.subheader("Preview of uploaded datasets")
-for name, df in zip(dataset_names, dataframes):
-    st.markdown(f"#### 📄 {name}")
-    st.write(df.head())
-
-# ---------- Schema matching ----------
-
-st.header("2. Schema matching (column-name intelligence)")
-
-all_columns = [df.columns.tolist() for df in dataframes]
-column_groups = suggest_column_groups(all_columns, threshold=85)
-mapping = build_canonical_mapping(column_groups)
-
-st.markdown("**Suggested column groups (similar names):**")
-for group in column_groups:
-    if len(group) > 1:
-        st.write(" • " + ", ".join(group))
-
-st.markdown(
-    """
-The app will **standardize column names within each group** (using the first name in each group as the canonical label).
-You can review this suggestion above. A more advanced version could allow manual editing of groupings.
-"""
-)
-
-# Apply canonical mapping to every dataframe
-harmonized_dfs = []
-for df in dataframes:
-    # Rename columns using canonical mapping
-    df_renamed = df.rename(columns=mapping)
-
-    # Ensure column names are unique (drop duplicated columns, keep first)
-    df_renamed = df_renamed.loc[:, ~df_renamed.columns.duplicated()]
-
-    harmonized_dfs.append(df_renamed)
-
-# ---------- Combine datasets (append) ----------
-
-st.header("3. Combine datasets")
-
-combine_mode = st.radio(
-    "How would you like to combine the datasets?",
-    ["Append rows (stack)", "Just keep separate (no combine yet)"]
-)
-
-combined_df = None
-if combine_mode == "Append rows (stack)":
-    for i, df in enumerate(harmonized_dfs):
-    dup_cols = df.columns[df.columns.duplicated()]
-    if len(dup_cols) > 0:
-        print(f"DataFrame {i} has duplicate columns: {list(dup_cols)}")
-    combined_df = pd.concat(harmonized_dfs, ignore_index=True)
-    st.success(f"Combined dataset shape: {combined_df.shape[0]} rows × {combined_df.shape[1]} columns")
-    st.dataframe(combined_df.head())
-else:
-    st.info("Datasets will be cleaned individually without combining.")
-    # For EDA/cleaning we will use only the first dataset if not combined
-    combined_df = harmonized_dfs[0]
-
-# ---------- Data cleaning ----------
-
-st.header("4. Data quality check & cleaning")
-
-if st.checkbox("Show data quality report"):
-    report = basic_cleaning_report(combined_df)
-    st.subheader("Missing values (per column)")
-    st.json(report["missing_counts"])
-
-    st.subheader("Outliers detected (per numeric column)")
-    st.json(report["outliers"])
-
-    st.subheader("Logical issues (age, income, etc.)")
-    st.json(report["logical_issues"])
-
-st.markdown("Click the button below to apply **basic cleaning rules** (convert numeric-like fields, fix age and negative incomes).")
-
-if st.button("Apply basic cleaning"):
-    cleaned_df = apply_basic_cleaning(combined_df)
-    st.success("Basic cleaning applied.")
-    st.dataframe(cleaned_df.head())
-
-    # Store cleaned in session state for EDA and download
-    st.session_state["cleaned_df"] = cleaned_df
-else:
-    st.session_state["cleaned_df"] = combined_df
-
-# ---------- EDA ----------
-
-st.header("5. Exploratory Data Analysis (EDA)")
-
-df_for_eda = st.session_state.get("cleaned_df", combined_df)
-eda_summary = generate_eda_summary(df_for_eda)
-
-st.subheader("Shape")
-st.write(eda_summary["shape"])
-
-st.subheader("Column types")
-st.json(eda_summary["columns"])
-
-st.subheader("Descriptive statistics")
-st.write(pd.DataFrame.from_dict(eda_summary["describe"], orient="index"))
-
-# Simple plots
-st.subheader("Quick plots")
-
-numeric_cols = df_for_eda.select_dtypes(include=[np.number]).columns.tolist()
-if numeric_cols:
-    chosen_num = st.selectbox("Choose a numeric column for histogram", numeric_cols)
-    st.bar_chart(df_for_eda[chosen_num].dropna())
-else:
-    st.info("No numeric columns available for plotting.")
-
-# ---------- Download cleaned dataset ----------
-
-st.header("6. Download cleaned / combined dataset")
-
-if df_for_eda is not None:
-    csv_data = df_for_eda.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "Download cleaned dataset as CSV",
-        data=csv_data,
-        file_name="cleaned_dataset.csv",
-        mime="text/csv"
+def normalize_column_names(df: pd.DataFrame) -> pd.DataFrame:
+    """Standardize column names to a consistent format and deduplicate."""
+    df = df.copy()
+    df.columns = (
+        df.columns.astype(str)
+        .str.strip()
+        .str.replace("\n", " ", regex=False)
+        .str.replace("\r", " ", regex=False)
+        .str.replace(r"\s+", "_", regex=True)
+        .str.lower()
     )
+
+    # Handle duplicates by appending a counter suffix
+    new_cols = []
+    seen: Dict[str, int] = {}
+    for col in df.columns:
+        if col not in seen:
+            seen[col] = 0
+            new_cols.append(col)
+        else:
+            seen[col] += 1
+            new_cols.append(f"{col}_{seen[col]}")
+    df.columns = new_cols
+
+    return df
+
+
+def basic_cleaning(df: pd.DataFrame) -> pd.DataFrame:
+    """Apply simple cleaning: strip strings, remove fully empty rows/cols."""
+    df = df.copy()
+
+    # Strip whitespace in object columns
+    for col in df.select_dtypes(include=["object"]).columns:
+        df[col] = df[col].astype(str).str.strip()
+
+    # Drop rows and columns that are completely empty
+    df = df.dropna(how="all")
+    df = df.dropna(axis=1, how="all")
+
+    # Reset index and ensure unique index
+    df = df.reset_index(drop=True)
+
+    # Ensure columns are unique again after cleaning
+    df = df.loc[:, ~df.columns.duplicated()]
+
+    return df
+
+
+def concat_harmonized(dfs: List[pd.DataFrame]) -> pd.DataFrame:
+    """Safely concatenate a list of harmonized DataFrames row-wise."""
+    cleaned = []
+    debug_info = []
+
+    for i, df in enumerate(dfs):
+        df2 = normalize_column_names(df)
+        df2 = basic_cleaning(df2)
+
+        # Collect debug info about duplicates, if any
+        dup_cols = df2.columns[df2.columns.duplicated()]
+        if len(dup_cols) > 0:
+            debug_info.append(
+                f"DataFrame {i} had duplicate columns after cleaning: {list(dup_cols)}"
+            )
+
+        if not df2.index.is_unique:
+            debug_info.append(
+                f"DataFrame {i} had non-unique index; index has been reset."
+            )
+
+        cleaned.append(df2)
+
+    if debug_info:
+        st.warning("Some issues were detected and automatically fixed during concatenation:")
+        for msg in debug_info:
+            st.text(f"- {msg}")
+
+    # Final safety: all indexes unique & columns unique
+    final_cleaned = []
+    for df in cleaned:
+        df = df.reset_index(drop=True)
+        df = df.loc[:, ~df.columns.duplicated()]
+        final_cleaned.append(df)
+
+    combined = pd.concat(final_cleaned, ignore_index=True)
+    return combined
+
+
+def download_link_from_df(df: pd.DataFrame, filename: str) -> None:
+    csv_bytes = df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        label=f"⬇️ Download cleaned data as {filename}",
+        data=csv_bytes,
+        file_name=filename,
+        mime="text/csv",
+    )
+
+
+# ---------------------------------------------
+# Streamlit app
+# ---------------------------------------------
+
+st.set_page_config(page_title="AI Data Cleaning Agent", layout="wide")
+
+st.title("🧹 AI Data Cleaning & Harmonization Agent")
+st.write(
+    "Upload one or more tabular datasets (CSV, Excel, JSON, TSV). "
+    "The app will standardize column names, perform basic cleaning, "
+    "and safely concatenate them into a single combined dataset without "
+    "pandas `InvalidIndexError` issues."
+)
+
+uploaded_files = st.file_uploader(
+    "Upload one or more files",
+    accept_multiple_files=True,
+    type=["csv", "xlsx", "xls", "json", "tsv", "txt"],
+)
+
+if not uploaded_files:
+    st.info("👆 Upload at least one file to begin.")
+    raise SystemExit
+
+# Load each file as DataFrame
+raw_dfs: List[pd.DataFrame] = []
+st.subheader("1️⃣ Preview of uploaded files")
+
+for i, uf in enumerate(uploaded_files):
+    with st.expander(f"File {i+1}: {uf.name}", expanded=i == 0):
+        try:
+            df = load_file(uf)
+        except Exception as e:
+            st.error(f"Could not read file `{uf.name}`: {e}")
+            continue
+
+        raw_dfs.append(df)
+
+        st.write("Shape:", df.shape)
+        st.write("Columns:", list(df.columns))
+        st.dataframe(df.head(10))
+
+if not raw_dfs:
+    st.error("No valid files could be loaded.")
+    raise SystemExit
+
+st.subheader("2️⃣ Clean and harmonize")
+
+if st.button("Run cleaning & harmonization"):
+    try:
+        combined_df = concat_harmonized(raw_dfs)
+
+        st.success(f"Successfully combined {len(raw_dfs)} datasets into a single DataFrame!")
+        st.write("Combined shape:", combined_df.shape)
+
+        st.subheader("3️⃣ Combined cleaned dataset (first 100 rows)")
+        st.dataframe(combined_df.head(100))
+
+        st.subheader("4️⃣ Download cleaned data")
+        download_link_from_df(combined_df, "combined_cleaned_data.csv")
+
+        st.subheader("5️⃣ Quick summary")
+        st.write("Column types:")
+        st.write(combined_df.dtypes)
+
+        st.write("Numeric summary:")
+        st.write(combined_df.describe(include=[np.number]).T)
+
+        st.write("Categorical summary (top categories):")
+        cat_cols = combined_df.select_dtypes(include=["object", "category"]).columns
+        if len(cat_cols) == 0:
+            st.write("No categorical columns found.")
+        else:
+            for col in cat_cols:
+                st.write(f"**{col}**")
+                st.write(combined_df[col].value_counts().head(10))
+
+    except Exception as e:
+        st.error(f"An unexpected error occurred during concatenation: {e}")
