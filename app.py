@@ -93,9 +93,10 @@ def load_file(uploaded_file) -> pd.DataFrame:
 # 3. Schema & name normalization
 # =========================================
 
-def normalize_column_names(df: pd.DataFrame) -> pd.DataFrame:
+def normalize_column_names(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, str]]:
     """
     Standardize column names to a consistent format, but keep original in a mapping.
+    Returns (normalized_df, original_to_normalized_map).
     """
     df = df.copy()
     original_cols = list(df.columns)
@@ -139,6 +140,7 @@ def suggest_similar_columns(dfs: Dict[str, pd.DataFrame]) -> List[Tuple[str, str
     Suggest potentially similar columns across files based on simple heuristics:
     - lower-case comparison without underscores
     - synonym mapping for common variable names (age, sex/gender, id)
+    Returns tuples of (file_name, col_in_that_file, matching_col_from_some_other_file).
     """
     import difflib
 
@@ -148,7 +150,7 @@ def suggest_similar_columns(dfs: Dict[str, pd.DataFrame]) -> List[Tuple[str, str
         for col in df.columns:
             col_entries.append((fname, col))
 
-    suggestions = []
+    suggestions: List[Tuple[str, str, str]] = []
     synonyms = {
         "sex": ["gender", "sex", "sexe"],
         "gender": ["gender", "sex", "sexe"],
@@ -172,7 +174,7 @@ def suggest_similar_columns(dfs: Dict[str, pd.DataFrame]) -> List[Tuple[str, str
 
             # synonym-based
             syn_match = False
-            for root, variants in synonyms.items():
+            for _, variants in synonyms.items():
                 if c1.lower() in variants and c2.lower() in variants:
                     syn_match = True
                     break
@@ -284,15 +286,18 @@ def detect_logical_inconsistencies(df: pd.DataFrame) -> List[str]:
     - age < 15 and education_level in [College/University]
     - employed == "Yes" and income == 0 or NaN
     """
-    messages = []
-    if {"age", "education_level"}.issubset({c.lower() for c in df.columns}):
-        # Map to actual names
-        col_map = {c.lower(): c for c in df.columns}
-        age_col = col_map["age"]
-        edu_col = col_map["education_level"]
+    messages: List[str] = []
+
+    # map lower col names
+    lower_name_map = {c.lower(): c for c in df.columns}
+
+    # Age & education rule
+    if "age" in lower_name_map and "education_level" in lower_name_map:
+        age_col = lower_name_map["age"]
+        edu_col = lower_name_map["education_level"]
         subset = df[[age_col, edu_col]].copy()
-        mask = subset[age_col] < 15
-        mask = mask & subset[edu_col].isin(["College", "University"])
+        with np.errstate(invalid="ignore"):
+            mask = (subset[age_col] < 15) & subset[edu_col].isin(["College", "University"])
         count = int(mask.sum())
         if count > 0:
             messages.append(
@@ -360,7 +365,7 @@ def harmonize_columns(
     """
     Apply user-defined mappings: mappings[file][old_col] = new_col.
     """
-    out = {}
+    out: Dict[str, pd.DataFrame] = {}
     for fname, df in dfs.items():
         df = df.copy()
         if fname in mappings:
@@ -391,7 +396,7 @@ def safely_merge(dfs: Dict[str, pd.DataFrame], key: str, how: str = "outer") -> 
         df = basic_cleaning(df)
         cleaned.append(df)
 
-    merged = None
+    merged: pd.DataFrame | None = None
     for df in cleaned:
         if key not in df.columns:
             continue
@@ -507,48 +512,49 @@ st.subheader("2️⃣ Schema Summary")
 schema_df = get_schema_summary(dfs_norm)
 st.dataframe(schema_df)
 
-# Suggest similar columns
+# -----------------------------------------
+# 3️⃣ Column Similarity & Harmonization
+# -----------------------------------------
 st.subheader("3️⃣ Column Similarity & Harmonization")
 
+# Initialize mappings
+harmonization_mappings: Dict[str, Dict[str, str]] = {fname: {} for fname in dfs_norm.keys()}
+
 suggestions = suggest_similar_columns(dfs_norm)
-if not suggestions:
-    st.write("No strong column similarity suggestions found. You can still harmonize manually.")
-else:
+if suggestions:
     st.write(
         "The agent detected potentially similar variables across datasets. "
         "Tick the ones that should be treated as the same variable."
     )
 
-    harmonization_mappings: Dict[str, Dict[str, str]] = {fname: {} for fname in dfs_norm.keys()}
-
     for (f1, c1, c2) in suggestions:
-        label = f"Treat `{c1}` in **{f1}** and `{c2}` in **other file** as the same variable?"
+        label = f"Treat `{c1}` in **{f1}** and `{c2}` in the other file as the same variable?"
         if st.checkbox(label, key=f"{f1}_{c1}_{c2}"):
-            base = c1  # choose first as canonical
+            base = c1  # choose the first as canonical
             # Map both columns to same base name
             harmonization_mappings[f1][c1] = base
             # Find which file the second col belongs to
             for fname, df in dfs_norm.items():
                 if c2 in df.columns:
                     harmonization_mappings[fname][c2] = base
-
-    # Allow manual mapping
-    st.markdown("**Manual harmonization (optional)**")
-    with st.expander("Map columns manually to a standard name", expanded=False):
-        for fname, df in dfs_norm.items():
-            st.markdown(f"**File: {fname}**")
-            for col in df.columns:
-                new_name = st.text_input(
-                    f"Standard name for `{col}` in {fname} (leave blank to keep)",
-                    value="",
-                    key=f"manual_{fname}_{col}",
-                )
-                if new_name:
-                    harmonization_mappings[fname][col] = new_name
-
 else:
-    harmonization_mappings = {fname: {} for fname in dfs_norm.keys()}
+    st.write("No strong column similarity suggestions found. You can still harmonize manually.")
 
+# Manual harmonization (always available)
+st.markdown("**Manual harmonization (optional)**")
+with st.expander("Map columns manually to a standard name", expanded=False):
+    for fname, df in dfs_norm.items():
+        st.markdown(f"**File: {fname}**")
+        for col in df.columns:
+            new_name = st.text_input(
+                f"Standard name for `{col}` in {fname} (leave blank to keep)",
+                value="",
+                key=f"manual_{fname}_{col}",
+            )
+            if new_name:
+                harmonization_mappings[fname][col] = new_name
+
+# Apply harmonization button
 if st.button("Apply harmonization & proceed to integration"):
     st.session_state["harmonized_dfs"] = harmonize_columns(dfs_norm, harmonization_mappings)
     st.success("Harmonization applied.")
@@ -558,6 +564,9 @@ else:
 
 harmonized_dfs: Dict[str, pd.DataFrame] = st.session_state["harmonized_dfs"]
 
+# -----------------------------------------
+# 4️⃣ Choose Integration Mode
+# -----------------------------------------
 st.subheader("4️⃣ Choose Integration Mode")
 
 integration_mode = st.radio(
@@ -597,7 +606,7 @@ if integrated_df.empty:
     st.stop()
 
 # =========================================
-# 9. Data-quality assessment & cleaning
+# 5️⃣ Data-quality assessment & cleaning
 # =========================================
 
 st.subheader("5️⃣ Data-Quality Assessment")
@@ -685,7 +694,7 @@ st.download_button(
 )
 
 # =========================================
-# 10. Optional ML-based anomaly detection
+# 8️⃣ Optional ML-based anomaly detection
 # =========================================
 
 st.subheader("8️⃣ Optional: ML-based Anomaly Detection")
@@ -702,7 +711,7 @@ if run_ml:
         st.write("No anomalies flagged (or model not run).")
 
 # =========================================
-# 11. EDA
+# 9️⃣ Exploratory Data Analysis (EDA)
 # =========================================
 
 st.subheader("9️⃣ Exploratory Data Analysis (EDA)")
