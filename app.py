@@ -1,5 +1,5 @@
 """
-AI Data Cleaning & Integration Agent
+Zalates Analytics – AI Data Cleaning & Integration Agent
 
 Core Responsibilities
 - Ingest multiple datasets (CSV, Excel, Stata, SPSS, JSON, pickle).
@@ -152,9 +152,7 @@ def get_schema_summary(dfs: Dict[str, pd.DataFrame]) -> pd.DataFrame:
 
 def suggest_similar_columns(dfs: Dict[str, pd.DataFrame]) -> List[Tuple[str, str, str]]:
     """
-    Suggest potentially similar columns across files based on simple heuristics:
-    - lower-case comparison without underscores
-    - simple synonyms for common variables
+    Suggest potentially similar columns across files based on simple heuristics.
     Returns tuples of (file_name, col_in_that_file, matching_col_from_some_other_file).
     """
     import difflib
@@ -170,8 +168,10 @@ def suggest_similar_columns(dfs: Dict[str, pd.DataFrame]) -> List[Tuple[str, str
         "gender": ["gender", "sex", "sexe"],
         "age": ["age", "age_years", "years", "age_yrs", "age_child", "age2"],
         "id": ["id", "hhid", "household_id", "respondent_id"],
-        "income": ["inc", "income", "income1", "income2", "income3", "income_monthly",
-                   "household_income", "hhinc"],
+        "income": [
+            "inc", "income", "income1", "income2", "income3",
+            "income_monthly", "household_income", "hhinc"
+        ],
     }
 
     def base_name(c: str) -> str:
@@ -340,7 +340,9 @@ def detect_logical_inconsistencies(df: pd.DataFrame) -> List[str]:
     income_col = None
     for c in df.columns:
         lc = c.lower()
-        if emp_col is None and lc in {"employed", "employment_status", "employment", "work_status"}:
+        if emp_col is None and lc in {
+            "employed", "employment_status", "employment", "work_status"
+        }:
             emp_col = c
         if income_col is None and any(k in lc for k in ["income", "salary", "wage", "earning", "pay"]):
             income_col = c
@@ -418,14 +420,16 @@ def auto_fix_age_education_inconsistencies(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def auto_fix_employment_income_inconsistencies(df: pd.DataFrame) -> pd.DataFrame:
-    """For employed='Yes' with income <=0 or missing, impute income using median income among employed."""
+    """For employed='Yes' with income <=0 or missing, impute income using median among employed."""
     df = df.copy()
 
     emp_col = None
     income_col = None
     for c in df.columns:
         lc = c.lower()
-        if emp_col is None and lc in {"employed", "employment_status", "employment", "work_status"}:
+        if emp_col is None and lc in {
+            "employed", "employment_status", "employment", "work_status"
+        }:
             emp_col = c
         if income_col is None and any(k in lc for k in ["income", "salary", "wage", "earning", "pay"]):
             income_col = c
@@ -676,14 +680,6 @@ def show_basic_eda(df: pd.DataFrame):
     else:
         st.write("Not enough numeric variables for correlation heatmap.")
 
-    st.markdown("### 📈 Simple Histogram")
-    num_cols = list(num_df.columns)
-    if num_cols:
-        col_to_plot = st.selectbox("Select numeric variable for histogram", num_cols)
-        st.bar_chart(num_df[col_to_plot].dropna().value_counts().sort_index())
-    else:
-        st.write("No numeric columns available for plotting.")
-
 
 def generate_narrative_from_eda(df: pd.DataFrame, title: str = "EDA summary") -> str:
     """Generate a simple narrative text based on numeric and categorical distributions."""
@@ -734,21 +730,45 @@ def generate_narrative_from_eda(df: pd.DataFrame, title: str = "EDA summary") ->
 
 
 # =========================================
-# 9. Streamlit App
+# 9. Streamlit App – layout & branding
 # =========================================
 
-st.set_page_config(page_title="AI Data Cleaning & Integration Agent", layout="wide")
-
-st.title("🧹 AI Data-Cleaning, Integration & Analysis Agent")
-
-st.write(
-    """
-This agent ingests multiple datasets, detects schema similarities, automatically
-integrates and cleans them by default, and then asks you whether you are satisfied
-with the result. If not, you can keep the integrated but uncleaned data for manual
-cleaning and custom analysis.
-"""
+st.set_page_config(
+    page_title="Zalates Analytics – AI Data Cleaning Agent",
+    layout="wide",
 )
+
+# Zalates gradient background + padding
+st.markdown(
+    """
+    <style>
+    .stApp {
+        background: linear-gradient(135deg, #1c1f4a 0%, #5e2b83 45%, #09a4b4 100%);
+        color: #f5f5f5;
+    }
+    .block-container {
+        padding-top: 1rem;
+        padding-bottom: 2rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# Header with logo + title
+logo_path = "logo-png-circle2.png"  # ensure this file is in the repo root
+col_logo, col_title = st.columns([1, 4])
+with col_logo:
+    if os.path.exists(logo_path):
+        st.image(logo_path, use_column_width=True)
+with col_title:
+    st.title("🧹 Zalates Analytics – AI Data-Cleaning, Integration & Analysis Agent")
+    st.markdown(
+        "Smart dashboards for **business & bank feasibility / risk analytics** – "
+        "clean, harmonize, and analyze your data in one place."
+    )
+
+st.markdown("---")
 
 # --- Sidebar options ---
 st.sidebar.header("Data & Options")
@@ -961,7 +981,7 @@ choice = st.radio(
 
 if choice.startswith("✅"):
     final_df = cleaned_df_auto
-    st.success("Using AUTOMATICALLY CLEANED dataset for EDA and download.")
+    st.success("Using AUTOMATICALLY CLEANED dataset for dashboards and download.")
 else:
     final_df = integrated_df
     st.warning("Using INTEGRATED BUT UNCLEANED dataset. You can clean it manually or offline.")
@@ -994,8 +1014,8 @@ if run_ml:
     else:
         st.write("No anomalies flagged (or model not run).")
 
-# 🔟 EDA on final dataset
-st.subheader("🔟 Exploratory Data Analysis (EDA) on Final Dataset")
+# 🔟 EDA & Dashboards on final dataset
+st.subheader("🔟 Exploratory Data Analysis & Dashboards")
 
 numeric_cols_all = list(final_df.select_dtypes(include=[np.number]).columns)
 cat_cols_all = list(final_df.select_dtypes(include=["object", "category"]).columns)
@@ -1034,16 +1054,126 @@ else:
         st.info("No variables selected for EDA.")
     else:
         df_for_eda = final_df[selected_cols].copy()
-        tab_results, tab_narrative = st.tabs(["📊 EDA Results", "📝 Narrative summary"])
-        with tab_results:
+
+        tab_summary, tab_viz, tab_segment, tab_narr = st.tabs(
+            ["📋 Summary & Stats", "📊 Visualizations", "🧩 Segmented (Slicer) Analysis", "📝 Narrative"]
+        )
+
+        # --- Summary & stats ---
+        with tab_summary:
             show_basic_eda(df_for_eda)
-        with tab_narrative:
+
+        # --- Visualizations (histograms, categorical charts, map) ---
+        with tab_viz:
+            st.markdown("#### Numeric distributions (histogram-style)")
+
+            if numeric_selected:
+                num_for_hist = st.selectbox(
+                    "Choose numeric variable", numeric_selected, key="hist_numeric"
+                )
+                # approximate histogram using value_counts
+                st.bar_chart(
+                    df_for_eda[num_for_hist]
+                    .dropna()
+                    .value_counts()
+                    .sort_index()
+                )
+            else:
+                st.info("No numeric variables selected.")
+
+            st.markdown("#### Categorical distributions")
+
+            if cat_selected:
+                cat_for_bar = st.selectbox(
+                    "Choose categorical variable", cat_selected, key="bar_categorical"
+                )
+                cat_counts = (
+                    df_for_eda[cat_for_bar]
+                    .value_counts(dropna=False)
+                    .head(20)
+                    .rename("count")
+                )
+                st.bar_chart(cat_counts)
+            else:
+                st.info("No categorical variables selected.")
+
+            st.markdown("#### Map (if latitude & longitude available)")
+            lat_cols = [c for c in final_df.columns if "lat" in c.lower()]
+            lon_cols = [c for c in final_df.columns if "lon" in c.lower() or "lng" in c.lower()]
+
+            if lat_cols and lon_cols:
+                lat_col = lat_cols[0]
+                lon_col = lon_cols[0]
+                map_df = (
+                    final_df[[lat_col, lon_col]]
+                    .dropna()
+                    .rename(columns={lat_col: "lat", lon_col: "lon"})
+                )
+                if not map_df.empty:
+                    st.map(map_df)
+                else:
+                    st.info("Latitude/longitude columns detected but all rows are missing.")
+            else:
+                st.caption("No latitude/longitude columns detected for mapping.")
+
+        # --- Segmented / slicer analysis ---
+        with tab_segment:
+            st.markdown(
+                "#### Slicer analysis – e.g., **income by gender**, "
+                "**education by region**, **income by gender & region**"
+            )
+
+            if not numeric_cols_all or not cat_cols_all:
+                st.info("Need at least one numeric and one categorical variable for slicer analysis.")
+            else:
+                target = st.selectbox(
+                    "Select numeric outcome (e.g., income)",
+                    numeric_cols_all,
+                    key="slicer_target",
+                )
+                slicer_1 = st.selectbox(
+                    "First slicer (categorical)", cat_cols_all, key="slicer1"
+                )
+                slicer_2 = st.selectbox(
+                    "Optional second slicer",
+                    ["(none)"] + cat_cols_all,
+                    key="slicer2",
+                )
+
+                if st.button("Run slicer analysis"):
+                    group_cols = [slicer_1] if slicer_2 == "(none)" else [slicer_1, slicer_2]
+                    grouped = (
+                        final_df[group_cols + [target]]
+                        .dropna(subset=[target])
+                        .groupby(group_cols)[target]
+                        .agg(["count", "mean"])
+                        .reset_index()
+                    )
+                    grouped.rename(columns={"count": "n", "mean": f"{target}_mean"}, inplace=True)
+
+                    st.markdown("**Grouped summary**")
+                    st.dataframe(grouped)
+
+                    st.markdown("**Visualization of mean by slicer(s)**")
+                    if slicer_2 == "(none)":
+                        chart_df = grouped.set_index(slicer_1)[f"{target}_mean"]
+                        st.bar_chart(chart_df)
+                    else:
+                        pivot = grouped.pivot(
+                            index=slicer_1,
+                            columns=slicer_2,
+                            values=f"{target}_mean",
+                        )
+                        st.bar_chart(pivot)
+
+        # --- Narrative summary ---
+        with tab_narr:
             narrative = generate_narrative_from_eda(df_for_eda, title="selected variables")
             st.markdown(narrative)
 
 st.markdown("---")
 st.caption(
     "Automatic cleaning is applied by default, but you always remain in control. "
-    "If you are not satisfied with the result, keep the integrated raw data and "
-    "apply your own cleaning rules."
+    "Use slicers and dashboards to explore income by gender, education by region, "
+    "or any other business-risk lens relevant for your feasibility analysis."
 )
