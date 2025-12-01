@@ -121,6 +121,10 @@ combine_mode = st.radio(
 
 combined_df = None
 if combine_mode == "Append rows (stack)":
+    for i, df in enumerate(harmonized_dfs):
+    dup_cols = df.columns[df.columns.duplicated()]
+    if len(dup_cols) > 0:
+        print(f"DataFrame {i} has duplicate columns: {list(dup_cols)}")
     combined_df = pd.concat(harmonized_dfs, ignore_index=True)
     st.success(f"Combined dataset shape: {combined_df.shape[0]} rows × {combined_df.shape[1]} columns")
     st.dataframe(combined_df.head())
