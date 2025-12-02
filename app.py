@@ -176,6 +176,19 @@ st.markdown(
     .stMarkdown, .stText, .stDataFrame {
         color: #e5e7eb;
     }
+    /* Narrative cards – darker background and readable text */
+    .narrative-card {
+        background: rgba(15,23,42,0.96);
+        border-radius: 1rem;
+        border: 1px solid rgba(148,163,184,0.7);
+        padding: 0.9rem 1.1rem;
+        box-shadow: 0 12px 32px rgba(15,23,42,0.9);
+        color: #f9fafb;
+        font-size: 0.92rem;
+        line-height: 1.55;
+        margin-bottom: 0.8rem;
+        white-space: pre-wrap;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -419,15 +432,15 @@ def create_dummy_integrated(n=500):
 def build_program_narrative(df, dataset_label):
     """
     Build a program/policy-level narrative based on HFIAS, HDDS/WDDS and youth indicators.
-    Returns markdown text you can display on screen and embed into the PDF.
+    Returns plain text you can display on screen and embed into the PDF.
     """
     name = dataset_label or "Current dataset"
     total_n = len(df)
 
     lines = []
     lines.append(
-        f"**Interpretation for this dataset (program/policy level)**  \n"
-        f"_Dataset: **{name}**, Records: **{total_n:,}**_"
+        f"Interpretation for this dataset (program/policy level)\n"
+        f"Dataset: {name}, Records: {total_n:,}\n"
     )
 
     # ---------- HFIAS ----------
@@ -446,10 +459,10 @@ def build_program_narrative(df, dataset_label):
             severe_pct = mod_pct = mild_pct = secure_pct = 0.0
 
         lines.append(
-            f"- Household food insecurity (HFIAS) shows an average score of **{hf_mean:.1f}**. "
-            f"Approximately **{severe_pct:.1f}%** of households are *severely food insecure*, "
-            f"and **{mod_pct:.1f}%** are *moderately food insecure*, compared to "
-            f"**{secure_pct:.1f}%** who are classified as *food secure*. This signals "
+            f"- Household food insecurity (HFIAS) shows an average score of {hf_mean:.1f}. "
+            f"Approximately {severe_pct:.1f}% of households are severely food insecure, "
+            f"and {mod_pct:.1f}% are moderately food insecure, compared to "
+            f"{secure_pct:.1f}% who are classified as food secure. This signals "
             f"substantial vulnerability that requires targeted safety nets and livelihood support."
         )
 
@@ -462,13 +475,13 @@ def build_program_narrative(df, dataset_label):
                 top_region = str(reg_hdds.index[0])
                 top_val = float(reg_hdds.iloc[0])
                 lines.append(
-                    f"- Household dietary diversity (HDDS) averages **{hdds_mean:.1f} food groups** in the last 24 hours. "
-                    f"Regions such as **{top_region}** reach up to **{top_val:.1f} groups**, while others lag behind, "
+                    f"- Household dietary diversity (HDDS) averages {hdds_mean:.1f} food groups in the last 24 hours. "
+                    f"Regions such as {top_region} reach up to {top_val:.1f} groups, while others lag behind, "
                     f"highlighting geographic inequities in access to diverse diets."
                 )
         else:
             lines.append(
-                f"- Household dietary diversity (HDDS) averages **{hdds_mean:.1f} food groups** in the last 24 hours. "
+                f"- Household dietary diversity (HDDS) averages {hdds_mean:.1f} food groups in the last 24 hours. "
                 f"Scores below 5–6 food groups suggest limited access to nutrient-dense foods among many households."
             )
 
@@ -477,8 +490,8 @@ def build_program_narrative(df, dataset_label):
         wdds_mean = float(df["wdds"].mean())
         wdds_hi = (df["wdds"] >= 5).mean() * 100
         lines.append(
-            f"- Women’s dietary diversity (WDDS) averages **{wdds_mean:.1f} food groups**. "
-            f"Only about **{wdds_hi:.1f}%** of women achieve a WDDS ≥ 5 food groups, indicating gaps in access to "
+            f"- Women’s dietary diversity (WDDS) averages {wdds_mean:.1f} food groups. "
+            f"Only about {wdds_hi:.1f}% of women achieve a WDDS ≥ 5 food groups, indicating gaps in access to "
             f"micronutrient-dense foods and a need for nutrition-sensitive agriculture, markets, and SBCC."
         )
 
@@ -502,13 +515,13 @@ def build_program_narrative(df, dataset_label):
 
         summary_bits = []
         if decision is not None and not np.isnan(decision):
-            summary_bits.append(f"decision-making power ≈ **{float(decision):.1f}/5**")
+            summary_bits.append(f"decision-making power ≈ {float(decision):.1f}/5")
         if agency is not None and not np.isnan(agency):
-            summary_bits.append(f"agency ≈ **{float(agency):.1f}/5**")
+            summary_bits.append(f"agency ≈ {float(agency):.1f}/5")
         if hope is not None and not np.isnan(hope):
-            summary_bits.append(f"hope for the future ≈ **{float(hope):.1f}/5**")
+            summary_bits.append(f"hope for the future ≈ {float(hope):.1f}/5")
         if fin is not None and not np.isnan(fin):
-            summary_bits.append(f"financial literacy ≈ **{float(fin):.1f}/5**")
+            summary_bits.append(f"financial literacy ≈ {float(fin):.1f}/5")
 
         if summary_bits:
             bits_str = ", ".join(summary_bits)
@@ -521,15 +534,15 @@ def build_program_narrative(df, dataset_label):
         if "received_training" in df.columns:
             trained_pct = (df["received_training"] == 1).mean() * 100
             lines.append(
-                f"- Only **{trained_pct:.1f}%** of youth are flagged as having received structured training. "
+                f"- Only {trained_pct:.1f}% of youth are flagged as having received structured training. "
                 f"This indicates strong scope for scaling cohort-based youth programs that intentionally target "
                 f"those with lower decision power and financial literacy scores."
             )
 
     # ---------- Responsible AI framing ----------
     lines.append(
-        "- These insights are derived from **aggregated household and youth data**; the assistant does **not** profile "
-        "or score individuals. It is designed as a **responsible AI decision-support tool** to inform program and "
+        "- These insights are derived from aggregated household and youth data; the assistant does not profile "
+        "or score individuals. It is designed as a responsible AI decision-support tool to inform program and "
         "policy adjustments (e.g., targeting, coverage, and service mix), not individual-level eligibility decisions."
     )
 
@@ -582,28 +595,101 @@ if data_source == "Use sample (dummy) dataset":
 
 elif data_source == "Upload your own dataset":
     uploaded_file = st.sidebar.file_uploader(
-        "Upload CSV, Excel, JSON, TSV, Stata, SPSS, or PDF file",
-        type=["csv", "xlsx", "xls", "json", "tsv", "txt", "dta", "sav", "pdf"],
+        "Upload data file",
+        type=[
+            "csv", "xlsx", "xls", "ods",
+            "json", "tsv", "txt",
+            "dta", "sav",
+            "parquet", "feather",
+            "pkl", "pickle",
+            "rds", "rda", "rdata",
+            "pdf",
+        ],
+        help="Supports CSV, Excel, TSV/TXT, Stata, SPSS, Parquet, Feather, R data, Python pickles and PDF text.",
     )
     if uploaded_file is not None:
         try:
             name = uploaded_file.name.lower()
+
             if name.endswith(".csv"):
                 df = pd.read_csv(uploaded_file)
-            elif name.endswith((".xlsx", ".xls")):
+
+            elif name.endswith((".xlsx", ".xls", ".ods")):
+                # For .ods you may need 'odfpy' installed
                 df = pd.read_excel(uploaded_file)
+
             elif name.endswith(".json"):
                 df = pd.read_json(uploaded_file)
+
             elif name.endswith((".tsv", ".txt")):
                 df = pd.read_csv(uploaded_file, sep="\t")
+
             elif name.endswith(".dta"):
+                # Stata
                 df = pd.read_stata(uploaded_file)
+
             elif name.endswith(".sav"):
-                import pyreadstat
-                df, meta = pyreadstat.read_sav(uploaded_file)
+                # SPSS via pyreadstat
+                try:
+                    import pyreadstat
+                    df, meta = pyreadstat.read_sav(uploaded_file)
+                except ImportError:
+                    st.error(
+                        "Reading SPSS (.sav) requires the 'pyreadstat' package. "
+                        "Add 'pyreadstat' to requirements.txt."
+                    )
+                    df = None
+
+            elif name.endswith(".parquet"):
+                df = pd.read_parquet(uploaded_file)
+
+            elif name.endswith(".feather"):
+                df = pd.read_feather(uploaded_file)
+
+            elif name.endswith((".pkl", ".pickle")):
+                import pickle
+                obj = pickle.load(uploaded_file)
+                if isinstance(obj, pd.DataFrame):
+                    df = obj
+                else:
+                    st.error(
+                        "The Python pickle file does not contain a pandas DataFrame. "
+                        "Please pickle a DataFrame object."
+                    )
+                    df = None
+
+            elif name.endswith((".rds", ".rda", ".rdata")):
+                # R data via pyreadr
+                try:
+                    import pyreadr
+                    result = pyreadr.read_r(uploaded_file)
+                    if len(result) == 0:
+                        st.error("No objects found in the R data file.")
+                        df = None
+                    else:
+                        # Take the first object that is a DataFrame
+                        df = None
+                        for obj_name, obj_val in result.items():
+                            if isinstance(obj_val, pd.DataFrame):
+                                df = obj_val
+                                dataset_label = f"R data ({obj_name})"
+                                break
+                        if df is None:
+                            st.error(
+                                "The R data file does not contain a pandas-compatible DataFrame."
+                            )
+                except ImportError:
+                    st.error(
+                        "Reading R data (.rds/.rda/.RData) requires the 'pyreadr' package. "
+                        "Add 'pyreadr' to requirements.txt."
+                    )
+                    df = None
+
             elif name.endswith(".pdf"):
+                # PDF support: convert pages to text using pdfplumber
                 try:
                     import pdfplumber
+
                     pages = []
                     with pdfplumber.open(uploaded_file) as pdf:
                         for i, page in enumerate(pdf.pages):
@@ -621,8 +707,10 @@ elif data_source == "Upload your own dataset":
                         "Check that 'pdfplumber' is in your requirements.txt."
                     )
                     df = None
+
             else:
                 st.error("Unsupported file format.")
+
         except Exception as e:
             st.error(f"Error loading file: {e}")
 
@@ -1188,7 +1276,11 @@ with tab_visual:
         )
         st.markdown("##### Scatter (numeric × numeric)")
         scatter_x = st.selectbox("X-axis", options=["(none)"] + numeric_cols)
-        scatter_y = st.selectbox("Y-axis", options=["(none)"] + numeric_cols, index=1 if len(numeric_cols) > 1 else 0)
+        scatter_y = st.selectbox(
+            "Y-axis",
+            options=["(none)"] + numeric_cols,
+            index=1 if len(numeric_cols) > 1 else 0,
+        )
 
     st.markdown("---")
 
@@ -1276,7 +1368,11 @@ with tab_ai:
     st.markdown("##### Program-/Policy-level Interpretation (Data-driven)")
 
     program_narrative = build_program_narrative(df, dataset_label)
-    st.markdown(program_narrative)
+    # Wrap in styled narrative card for readability
+    st.markdown(
+        f"<div class='narrative-card'>{program_narrative}</div>",
+        unsafe_allow_html=True,
+    )
 
     st.markdown("---")
     st.markdown("##### AI Narrative Report (optional, using OpenAI)")
@@ -1286,6 +1382,7 @@ with tab_ai:
             "OpenAI is not fully available. Install the `openai` package and "
             "set `OPENAI_API_KEY` in Streamlit secrets to enable the AI-generated narrative."
         )
+        ai_text = None
     else:
         user_prompt = st.text_area(
             "Optional: refine what you want the AI to focus on",
@@ -1297,6 +1394,7 @@ with tab_ai:
             ),
         )
 
+        ai_text = None
         if st.button("Generate AI Narrative"):
             context_sample = df.head(10).to_dict()
             combined_narrative = (
@@ -1319,9 +1417,15 @@ with tab_ai:
                     temperature=0.2,
                 )
                 ai_text = completion.choices[0].message.content
-                st.markdown(ai_text)
             except Exception as e:
                 st.error(f"OpenAI API error: {e}")
+
+    # Show AI narrative (if any) in the same dark card style for readability
+    if ai_text:
+        st.markdown(
+            f"<div class='narrative-card'>{ai_text}</div>",
+            unsafe_allow_html=True,
+        )
 
     st.markdown("---")
     st.markdown("##### Downloads")
@@ -1348,8 +1452,8 @@ with tab_ai:
                 0.5, 0.95, title, ha="center", va="top", fontsize=14, weight="bold"
             )
 
-            # Strip markdown for PDF and wrap text
-            plain = program_narrative.replace("**", "").replace("_", "")
+            # Wrap text for the PDF page
+            plain = program_narrative
             lines = plain.split("\n")
             y = 0.9
             dy = 0.03
