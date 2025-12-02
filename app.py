@@ -8,7 +8,13 @@ import matplotlib.pyplot as plt
 import streamlit as st
 from matplotlib.backends.backend_pdf import PdfPages
 
-import openai
+# Optional OpenAI import
+try:
+    import openai
+    openai_available = True
+except ImportError:
+    openai = None
+    openai_available = False
 import requests  # for KoboToolbox API calls
 import plotly.express as px  # interactive charts
 
