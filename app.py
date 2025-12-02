@@ -1,1433 +1,1374 @@
-""""
-Zalates Analytics – AI Data Cleaning & Integration Agent
-(Futuristic but readable theme + GPS maps + rich visualizations)
-"""
+# streamlit_app.py
 
-import os
-import pickle
-from typing import Dict, List, Tuple
-
+import io
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
+
 import streamlit as st
-import plotly.express as px  # for nicer geo maps & charts
+from matplotlib.backends.backend_pdf import PdfPages
 
-# Optional imports for SPSS
-try:
-    import pyreadstat  # for .sav
-except ImportError:
-    pyreadstat = None
+import openai
+import requests  # for KoboToolbox API calls
+import plotly.express as px  # interactive charts
 
-
-# =========================================
-# 1. Synthetic example dataset
-# =========================================
-
-def generate_synthetic_dataset(n: int = 300) -> pd.DataFrame:
-    """Generate a synthetic dataset with missing values, extremes, and inconsistencies."""
-    rng = np.random.default_rng(42)
-    ages = rng.integers(-5, 150, size=n)  # includes impossible ages
-    income = rng.normal(3000, 1500, size=n)
-    income[rng.choice(n, size=15, replace=False)] = -100   # negative income
-    income[rng.choice(n, size=5, replace=False)] = 2_000_000  # extreme income
-
-    gender = rng.choice(["Male", "Female", "Other", None, "Unknown"], size=n)
-    employed = rng.choice(["Yes", "No"], size=n)
-    edu = rng.choice(["None", "Primary", "Secondary", "College", "University"], size=n)
-
-    # Introduce contradictions
-    for i in range(0, n, 25):
-        ages[i] = 8
-        edu[i] = "University"
-
-    df = pd.DataFrame(
-        {
-            "ID": np.arange(1, n + 1),
-            "Age": ages,
-            "gender": gender,
-            "income_monthly": income,
-            "employed": employed,
-            "education_level": edu,
-        }
-    )
-
-    # Add missingness
-    for col in ["Age", "income_monthly"]:
-        df.loc[rng.choice(n, size=20, replace=False), col] = np.nan
-
-    # Placeholder values
-    df.loc[rng.choice(n, size=10, replace=False), "income_monthly"] = 999999
-    df.loc[rng.choice(n, size=10, replace=False), "gender"] = "?"
-
-    return df
-
-
-# =========================================
-# 2. File loading
-# =========================================
-
-def load_file(uploaded_file) -> pd.DataFrame:
-    """Load a file into a pandas DataFrame based on extension."""
-    name = uploaded_file.name.lower()
-
-    if name.endswith(".csv"):
-        return pd.read_csv(uploaded_file)
-    if name.endswith(".xlsx") or name.endswith(".xls"):
-        return pd.read_excel(uploaded_file)
-    if name.endswith(".dta"):
-        return pd.read_stata(uploaded_file)
-    if name.endswith(".sav"):
-        if pyreadstat is None:
-            raise ImportError("pyreadstat is required to read .sav files. Please install it.")
-        df, _ = pyreadstat.read_sav(uploaded_file)
-        return df
-    if name.endswith(".json"):
-        return pd.read_json(uploaded_file)
-    if name.endswith(".pkl") or name.endswith(".pickle"):
-        return pickle.load(uploaded_file)
-    if name.endswith(".tsv") or name.endswith(".txt"):
-        return pd.read_csv(uploaded_file, sep="\t")
-
-    # Fallback: try CSV
-    return pd.read_csv(uploaded_file)
-
-
-# =========================================
-# 3. Schema & name normalization
-# =========================================
-
-def normalize_column_names(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, str]]:
-    """
-    Standardize column names to snake_case, but keep original names in a mapping.
-    Returns (normalized_df, original_to_normalized_map).
-    """
-    df = df.copy()
-    original_cols = list(df.columns)
-    norm_cols = (
-        pd.Index(df.columns)
-        .astype(str)
-        .str.strip()
-        .str.replace("\n", " ", regex=False)
-        .str.replace("\r", " ", regex=False)
-        .str.replace(r"\s+", "_", regex=True)
-        .str.lower()
-    )
-
-    # handle duplicates by adding suffix
-    new_cols: List[str] = []
-    seen: Dict[str, int] = {}
-    for col in norm_cols:
-        if col not in seen:
-            seen[col] = 0
-            new_cols.append(col)
-        else:
-            seen[col] += 1
-            new_cols.append(f"{col}_{seen[col]}")
-
-    df.columns = new_cols
-    col_map = dict(zip(original_cols, new_cols))
-    return df, col_map
-
-
-def get_schema_summary(dfs: Dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """Return a tidy schema summary: file, variable, dtype."""
-    rows = []
-    for fname, df in dfs.items():
-        for col in df.columns:
-            rows.append({"file": fname, "variable": col, "dtype": str(df[col].dtype)})
-    return pd.DataFrame(rows)
-
-
-def suggest_similar_columns(dfs: Dict[str, pd.DataFrame]) -> List[Tuple[str, str, str]]:
-    """
-    Suggest potentially similar columns across files based on simple heuristics.
-    Returns tuples of (file_name, col_in_that_file, matching_col_from_some_other_file).
-    """
-    import difflib
-
-    col_entries = []  # (file, col)
-    for fname, df in dfs.items():
-        for col in df.columns:
-            col_entries.append((fname, col))
-
-    suggestions: List[Tuple[str, str, str]] = []
-    synonyms = {
-        "sex": ["sex", "gender", "sexe"],
-        "gender": ["gender", "sex", "sexe"],
-        "age": ["age", "age_years", "years", "age_yrs", "age_child", "age2"],
-        "id": ["id", "hhid", "household_id", "respondent_id"],
-        "income": [
-            "inc", "income", "income1", "income2", "income3",
-            "income_monthly", "household_income", "hhinc"
-        ],
-    }
-
-    def base_name(c: str) -> str:
-        return c.lower().replace("_", "").replace(" ", "")
-
-    for i in range(len(col_entries)):
-        f1, c1 = col_entries[i]
-        for j in range(i + 1, len(col_entries)):
-            f2, c2 = col_entries[j]
-            if f1 == f2:
-                continue
-
-            b1, b2 = base_name(c1), base_name(c2)
-            ratio = difflib.SequenceMatcher(None, b1, b2).ratio()
-
-            syn_match = False
-            for _, variants in synonyms.items():
-                if c1.lower() in variants and c2.lower() in variants:
-                    syn_match = True
-                    break
-
-            if syn_match or ratio > 0.8:
-                suggestions.append((f1, c1, c2))
-
-    unique_suggestions = list(dict.fromkeys(suggestions))
-    return unique_suggestions
-
-
-# =========================================
-# 4. Data cleaning utilities
-# =========================================
-
-PLACEHOLDER_VALUES = {"?", "NA", "N/A", "na", "NaN", "nan", "999", "9999", "Unknown", "unknown"}
-
-
-def basic_cleaning(df: pd.DataFrame) -> pd.DataFrame:
-    """Basic structural cleaning: strip strings, remove empty rows/cols, reset index."""
-    df = df.copy()
-
-    for col in df.select_dtypes(include=["object"]).columns:
-        df[col] = df[col].astype(str).str.strip()
-        df[col] = df[col].replace(list(PLACEHOLDER_VALUES), np.nan)
-
-    df = df.dropna(how="all")
-    df = df.dropna(axis=1, how="all")
-
-    df = df.reset_index(drop=True)
-    df = df.loc[:, ~df.columns.duplicated()]
-    return df
-
-
-def detect_missingness(df: pd.DataFrame) -> pd.DataFrame:
-    """Return missingness summary per column."""
-    total = len(df)
-    miss = df.isna().sum()
-    return pd.DataFrame(
-        {
-            "missing_count": miss,
-            "missing_pct": (miss / total * 100).round(2),
-            "dtype": df.dtypes.astype(str),
-        }
-    ).sort_values("missing_pct", ascending=False)
-
-
-def detect_numeric_extremes(df: pd.DataFrame) -> pd.DataFrame:
-    """Flag potential extreme values for numeric columns."""
-    rows = []
-    num_df = df.select_dtypes(include=[np.number])
-    for col in num_df.columns:
-        series = num_df[col].dropna()
-        if series.empty:
-            continue
-        q1, q3 = np.percentile(series, [25, 75])
-        iqr = q3 - q1
-        lower = q1 - 1.5 * iqr
-        upper = q3 + 1.5 * iqr
-        outliers = ((series < lower) | (series > upper)).sum()
-
-        rule_note = ""
-        if "age" in col.lower():
-            rule_note = "Age rule (0–120)"
-            impossible = ((series < 0) | (series > 120)).sum()
-        elif "income" in col.lower() or "salary" in col.lower():
-            rule_note = "Income rule (>=0 & < 1,000,000)"
-            impossible = ((series < 0) | (series > 1_000_000)).sum()
-        else:
-            impossible = np.nan
-
-        rows.append(
-            {
-                "variable": col,
-                "n": len(series),
-                "outliers_iqr": int(outliers),
-                "rule_note": rule_note,
-                "impossible_rule_violations": (
-                    int(impossible) if not np.isnan(impossible) else np.nan
-                ),
-                "min": series.min(),
-                "max": series.max(),
-            }
-        )
-    return pd.DataFrame(rows)
-
-
-def detect_duplicates(df: pd.DataFrame, id_cols: List[str]) -> Dict[str, int]:
-    """Return count of duplicates for each ID column."""
-    result = {}
-    for col in id_cols:
-        if col in df.columns:
-            dup_count = df.duplicated(subset=[col]).sum()
-            result[col] = int(dup_count)
-    return result
-
-
-def detect_logical_inconsistencies(df: pd.DataFrame) -> List[str]:
-    """
-    Detect simple logical inconsistencies:
-    - adolescent age and higher education
-    - employed == "Yes" and income <= 0 or missing
-    """
-    messages: List[str] = []
-
-    # Age
-    age_col = None
-    age_series = None
-    for c in df.columns:
-        if "age" in c.lower():
-            s = pd.to_numeric(df[c], errors="coerce")
-            if s.notna().sum() > 0:
-                age_col = c
-                age_series = s
-                break
-
-    # Education
-    edu_col = None
-    edu_keywords = ["educ", "school", "grade", "class", "level"]
-    for c in df.columns:
-        name = c.lower()
-        if any(k in name for k in edu_keywords):
-            edu_col = c
-            break
-
-    if age_col is not None and edu_col is not None:
-        edu_series = df[edu_col].astype(str).str.lower()
-        higher_terms = [
-            "university",
-            "college",
-            "bachelor",
-            "master",
-            "phd",
-            "higher",
-            "diploma",
-            "degree",
-        ]
-        higher_mask = edu_series.str.contains("|".join(higher_terms), na=False)
-        young_mask = (age_series >= 5) & (age_series < 18)
-        count = int((young_mask & higher_mask).sum())
-        if count > 0:
-            messages.append(
-                f"{count} records: age 5–17 but education suggests higher/tertiary level "
-                f"(column '{edu_col}')."
-            )
-
-    # Employment & income
-    emp_col = None
-    income_col = None
-    for c in df.columns:
-        lc = c.lower()
-        if emp_col is None and lc in {
-            "employed", "employment_status", "employment", "work_status"
-        }:
-            emp_col = c
-        if income_col is None and any(k in lc for k in ["income", "salary", "wage", "earning", "pay"]):
-            income_col = c
-
-    if emp_col is not None and income_col is not None:
-        emp_series = df[emp_col].astype(str).str.lower()
-        inc_series = pd.to_numeric(df[income_col], errors="coerce")
-        with np.errstate(invalid="ignore"):
-            mask = (emp_series == "yes") & ((inc_series <= 0) | inc_series.isna())
-        count = int(mask.sum())
-        if count > 0:
-            messages.append(
-                f"{count} records: employed='Yes' but income is 0 or missing "
-                f"(columns '{emp_col}' and '{income_col}')."
-            )
-
-    return messages
-
-
-def auto_fix_age_education_inconsistencies(df: pd.DataFrame) -> pd.DataFrame:
-    """Fix cases where age is in 5–17 band but education is unrealistically high."""
-    df = df.copy()
-
-    age_col = None
-    age_series = None
-    for c in df.columns:
-        if "age" in c.lower():
-            s = pd.to_numeric(df[c], errors="coerce")
-            if s.notna().sum() > 0:
-                age_col = c
-                age_series = s
-                break
-
-    edu_col = None
-    edu_keywords = ["educ", "school", "grade", "class", "level"]
-    for c in df.columns:
-        name = c.lower()
-        if any(k in name for k in edu_keywords):
-            edu_col = c
-            break
-
-    if age_col is None or edu_col is None:
-        return df
-
-    edu_series = df[edu_col].astype(str)
-    band_mask = (age_series >= 5) & (age_series < 18)
-    higher_terms = [
-            "university",
-            "college",
-            "bachelor",
-            "master",
-            "phd",
-            "higher",
-            "diploma",
-            "degree",
-    ]
-    higher_mask = edu_series.str.lower().str.contains("|".join(higher_terms), na=False)
-
-    inconsistent_mask = band_mask & higher_mask
-    if inconsistent_mask.sum() == 0:
-        return df
-
-    normal_band_mask = band_mask & ~inconsistent_mask
-    if normal_band_mask.sum() > 0:
-        mode_vals = edu_series[normal_band_mask].mode()
-        if len(mode_vals) > 0:
-            replacement = mode_vals.iloc[0]
-        else:
-            replacement = "Secondary"
-    else:
-        replacement = "Secondary"
-
-    df.loc[inconsistent_mask, edu_col] = replacement
-    return df
-
-
-def auto_fix_employment_income_inconsistencies(df: pd.DataFrame) -> pd.DataFrame:
-    """For employed='Yes' with income <=0 or missing, impute income using median among employed."""
-    df = df.copy()
-
-    emp_col = None
-    income_col = None
-    for c in df.columns:
-        lc = c.lower()
-        if emp_col is None and lc in {
-            "employed", "employment_status", "employment", "work_status"
-        }:
-            emp_col = c
-        if income_col is None and any(k in lc for k in ["income", "salary", "wage", "earning", "pay"]):
-            income_col = c
-
-    if emp_col is None or income_col is None:
-        return df
-
-    emp_series = df[emp_col].astype(str).str.lower()
-    inc_series = pd.to_numeric(df[income_col], errors="coerce")
-
-    employed_mask = emp_series == "yes"
-    valid_income_mask = employed_mask & (inc_series > 0)
-    if valid_income_mask.sum() == 0:
-        return df
-
-    median_income = inc_series[valid_income_mask].median()
-    fix_mask = employed_mask & ((inc_series <= 0) | inc_series.isna())
-    df.loc[fix_mask, income_col] = median_income
-    return df
-
-
-def strong_numeric_cleaning(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Strong numeric cleaning:
-    - Convert numeric-like text to numeric.
-    - Age-like: 0–120, impute median, clip.
-    - Income-like: 0–1e6, impute median, clip.
-    - Others: trim extreme outliers, impute median.
-    """
-    df = df.copy()
-
-    for col in df.columns:
-        if df[col].dtype == "object":
-            converted = pd.to_numeric(df[col], errors="coerce")
-            if converted.notna().sum() > 0:
-                df[col] = converted
-
-        if not pd.api.types.is_numeric_dtype(df[col]):
-            continue
-
-        s = pd.to_numeric(df[col], errors="coerce")
-        col_lower = col.lower()
-
-        if "age" in col_lower:
-            s = s.where((s >= 0) & (s <= 120), np.nan)
-            if s.notna().sum() > 0:
-                median_age = s.median()
-                s = s.fillna(median_age)
-            s = s.clip(lower=0, upper=120)
-            df[col] = s
-
-        elif any(k in col_lower for k in ["income", "salary", "wage", "earning", "pay"]):
-            s = s.where((s >= 0) & (s <= 1_000_000), np.nan)
-            if s.notna().sum() > 0:
-                median_inc = s.median()
-                s = s.fillna(median_inc)
-            s = s.clip(lower=0, upper=1_000_000)
-            df[col] = s
-
-        else:
-            s_valid = s.dropna()
-            if s_valid.empty:
-                df[col] = s
-                continue
-            q1, q3 = np.percentile(s_valid, [25, 75])
-            iqr = q3 - q1
-            lower = q1 - 3 * iqr
-            upper = q3 + 3 * iqr
-            s = s.where((s >= lower) & (s <= upper), np.nan)
-            if s.notna().sum() > 0:
-                median_val = s.median()
-                s = s.fillna(median_val)
-            df[col] = s
-
-    return df
-
-
-def auto_impute_categorical_missing(df: pd.DataFrame) -> pd.DataFrame:
-    """Impute missing categorical values using the mode."""
-    df = df.copy()
-    cat_cols = df.select_dtypes(include=["object", "category"]).columns
-    for col in cat_cols:
-        if df[col].isna().any():
-            mode_vals = df[col].mode(dropna=True)
-            if len(mode_vals) > 0:
-                df[col] = df[col].fillna(mode_vals.iloc[0])
-    return df
-
-
-def final_post_clean(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Final pass:
-    - Replace common placeholder strings with NaN.
-    - Drop rows that are completely empty.
-    """
-    df = df.copy()
-    for col in df.columns:
-        if df[col].dtype == "object":
-            df[col] = df[col].replace(list(PLACEHOLDER_VALUES), np.nan)
-    df = df.dropna(how="all")
-    return df
-
-
-# =========================================
-# 5. Anomaly detection (optional ML)
-# =========================================
-
-def run_isolation_forest(df: pd.DataFrame, contamination: float = 0.05) -> pd.Series:
-    """Run Isolation Forest on numeric columns, return anomaly flag Series."""
-    try:
-        from sklearn.ensemble import IsolationForest
-    except ImportError:
-        st.warning("scikit-learn is not installed; Isolation Forest is unavailable.")
-        return pd.Series([0] * len(df), index=df.index)
-
-    num_df = df.select_dtypes(include=[np.number]).dropna()
-    if num_df.shape[1] < 1 or num_df.shape[0] < 10:
-        st.info("Not enough numeric data for Isolation Forest.")
-        return pd.Series([0] * len(df), index=df.index)
-
-    model = IsolationForest(contamination=contamination, random_state=42)
-    preds = model.fit_predict(num_df)
-    anomaly = pd.Series(0, index=df.index)
-    anomaly.loc[num_df.index] = (preds == -1).astype(int)
-    return anomaly
-
-
-# =========================================
-# 6. Semantic variable collapsing (income, age, etc.)
-# =========================================
-
-SEMANTIC_GROUPS = {
-    "income": [
-        "inc", "income", "income1", "income2", "income3",
-        "income_monthly", "hhinc", "household_income", "hh_income", "householdinc",
-    ],
-    "age": [
-        "age", "age_yrs", "age_years", "age2", "age_child", "child_age",
-    ],
-}
-
-
-def collapse_semantic_groups(df: pd.DataFrame,
-                             groups: Dict[str, List[str]] = SEMANTIC_GROUPS
-                             ) -> pd.DataFrame:
-    """
-    For each semantic group (e.g., income), find all related columns and
-    collapse them into a single canonical column (first non-null per row),
-    then drop the redundant columns.
-    """
-    df = df.copy()
-
-    for canonical, patterns in groups.items():
-        fam_cols = []
-        for col in df.columns:
-            lc = col.lower()
-            if any(p in lc for p in patterns):
-                fam_cols.append(col)
-
-        if not fam_cols:
-            continue
-
-        if canonical in fam_cols:
-            base_col = canonical
-            other_cols = [c for c in fam_cols if c != canonical]
-            if other_cols:
-                df[base_col] = df[[base_col] + other_cols].bfill(axis=1).iloc[:, 0]
-        else:
-            df[canonical] = df[fam_cols].bfill(axis=1).iloc[:, 0]
-            base_col = canonical
-            other_cols = fam_cols
-
-        cols_to_drop = [c for c in fam_cols if c != base_col]
-        df = df.drop(columns=cols_to_drop)
-
-    df = df.loc[:, ~df.columns.duplicated()]
-    return df
-
-
-# =========================================
-# 7. Integration: append vs merge
-# =========================================
-
-def harmonize_columns(
-    dfs: Dict[str, pd.DataFrame],
-    mappings: Dict[str, Dict[str, str]],
-) -> Dict[str, pd.DataFrame]:
-    """Apply user-defined mappings: mappings[file][old_col] = new_col."""
-    out: Dict[str, pd.DataFrame] = {}
-    for fname, df in dfs.items():
-        df = df.copy()
-        if fname in mappings:
-            df = df.rename(columns=mappings[fname])
-        df = df.loc[:, ~df.columns.duplicated()]
-        out[fname] = df
-    return out
-
-
-def safely_append(dfs: Dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """Vertically append multiple DataFrames with basic cleaning."""
-    cleaned = []
-    for df in dfs.values():
-        df = basic_cleaning(df)
-        df = df.reset_index(drop=True)
-        df = df.loc[:, ~df.columns.duplicated()]
-        cleaned.append(df)
-
-    combined = pd.concat(cleaned, ignore_index=True, sort=False)
-    return combined
-
-
-def safely_merge(dfs: Dict[str, pd.DataFrame], key: str, how: str = "outer") -> pd.DataFrame:
-    """Horizontally merge multiple DataFrames on a key."""
-    cleaned = []
-    for df in dfs.values():
-        df = basic_cleaning(df)
-        cleaned.append(df)
-
-    merged: pd.DataFrame | None = None
-    for df in cleaned:
-        if key not in df.columns:
-            continue
-        if merged is None:
-            merged = df
-        else:
-            merged = pd.merge(merged, df, on=key, how=how, suffixes=("", "_dup"))
-
-    if merged is None:
-        st.error(f"No dataset contained the key column '{key}'.")
-        return pd.DataFrame()
-
-    merged = merged.loc[:, ~merged.columns.duplicated()]
-    merged = merged.reset_index(drop=True)
-    return merged
-
-
-# =========================================
-# 8. EDA helpers
-# =========================================
-
-def generate_narrative_from_eda(df: pd.DataFrame, title: str = "EDA summary") -> str:
-    """Generate a simple narrative text based on numeric and categorical distributions."""
-    numeric_cols = list(df.select_dtypes(include=[np.number]).columns)
-    cat_cols = list(df.select_dtypes(include=["object", "category"]).columns)
-
-    lines = [f"**Narrative summary – {title}**"]
-    lines.append(
-        f"- The dataset used for EDA contains **{df.shape[0]} observations** and **{df.shape[1]} variables**."
-    )
-    lines.append(
-        f"- Of these, **{len(numeric_cols)} numeric** variables and **{len(cat_cols)} categorical** variables were included in the analysis."
-    )
-
-    if numeric_cols:
-        lines.append("")
-        lines.append("**Numeric variables – central tendency and spread**")
-        desc = df[numeric_cols].describe().T
-        for col in numeric_cols[:5]:
-            if col in desc.index:
-                row = desc.loc[col]
-                lines.append(
-                    f"- `{col}` has a mean of **{row['mean']:.2f}**, "
-                    f"ranging from **{row['min']:.2f}** to **{row['max']:.2f}**."
-                )
-
-    if cat_cols:
-        lines.append("")
-        lines.append("**Categorical variables – dominant categories**")
-        for col in cat_cols[:5]:
-            vc = df[col].value_counts(dropna=True)
-            if not vc.empty:
-                top_cat = vc.index[0]
-                top_count = int(vc.iloc[0])
-                top_pct = (top_count / len(df) * 100) if len(df) > 0 else 0
-                lines.append(
-                    f"- In `{col}`, the most frequent category is **{top_cat}** "
-                    f"({top_count} records, ~{top_pct:.1f}% of observations)."
-                )
-
-    lines.append("")
-    lines.append(
-        "Overall, these patterns provide a starting point for deeper inferential analysis, "
-        "segmentation, or model-building, depending on the project objectives."
-    )
-
-    return "\n".join(lines)
-
-
-# =========================================
-# 9. Streamlit App – layout & branding
-# =========================================
-
+# ---------------- STREAMLIT CONFIG ----------------
 st.set_page_config(
-    page_title="Zalates Analytics – AI Data Cleaning Agent",
+    page_title="AI Food & Youth Analysis Assistant",
     layout="wide",
+    page_icon="📊",
 )
 
-# ---- NEW GLOBAL + SIDEBAR THEME (high contrast, readable) ----
+# ---------- Global theming & layout (bold colours, fonts, hover) ----------
 st.markdown(
     """
     <style>
-    /* Global font */
-    html, body, [class*="css"] {
-        font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, "Roboto", sans-serif;
-        font-size: 15px;
-    }
-
-    /* Main app background and container */
-    .stApp {
-        background: radial-gradient(circle at 0% 0%, #020617 0%, #020617 40%, #020617 100%);
+    /* Main background & typography */
+    .main {
+        background: radial-gradient(circle at top left, #0f172a 0%, #020617 40%, #111827 70%, #451a03 100%);
+        color: #f9fafb;
+        font-family: "system-ui", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
     .block-container {
-        padding-top: 1rem;
-        padding-bottom: 2rem;
-        background-color: #f9fafb;
-        color: #111827;
-        border-radius: 18px;
-        box-shadow: 0 18px 40px rgba(15, 23, 42, 0.55);
-        margin-top: 1rem;
-        margin-bottom: 2rem;
+        padding-top: 0.75rem;
+        padding-bottom: 2.5rem;
+        max-width: 1400px;
     }
 
-    /* ------------------------------
-       FULL DARK SIDEBAR (no white)
-    ------------------------------*/
-    [data-testid="stSidebar"] {
-        background-color: #0b1220 !important;
-        padding: 1.2rem 1rem !important;
+    /* Sidebar styling */
+    section[data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #020617 0%, #111827 50%, #0b1120 100%);
+        border-right: 1px solid rgba(148,163,184,0.4);
+    }
+    section[data-testid="stSidebar"] * {
+        color: #e5e7eb !important;
+        font-size: 0.92rem;
     }
 
-    /* Remove all white/gray from inner elements */
-    [data-testid="stSidebar"] * {
-        background-color: transparent !important;
-        color: #e8ecf1 !important;
+    /* Hero card */
+    .hero-card {
+        padding: 1.4rem 1.8rem;
+        border-radius: 1.4rem;
+        background: radial-gradient(circle at top left, #0f172a 0%, #020617 60%, #7c2d12 100%);
+        border: 1px solid rgba(251,146,60,0.7);
+        box-shadow: 0 22px 60px rgba(15,23,42,0.8);
+        position: relative;
+        overflow: hidden;
+    }
+    .hero-card::before {
+        content: "";
+        position: absolute;
+        top: -40%;
+        right: -10%;
+        width: 260px;
+        height: 260px;
+        background: radial-gradient(circle, rgba(251,146,60,0.25) 0, transparent 70%);
+        filter: blur(4px);
+        opacity: 0.9;
+    }
+    .hero-title {
+        font-size: 2.1rem;
+        font-weight: 800;
+        letter-spacing: 0.04em;
+        background: linear-gradient(90deg,#f97316,#facc15,#f97316);
+        -webkit-background-clip: text;
+        color: transparent;
+        margin-bottom: 0.35rem;
+    }
+    .hero-subtitle {
+        font-size: 0.98rem;
+        color: #e5e7eb;
+        opacity: 0.95;
+        max-width: 720px;
+    }
+    .hero-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.45rem;
+        padding: 0.25rem 0.7rem;
+        border-radius: 999px;
+        background: rgba(15,23,42,0.85);
+        border: 1px solid rgba(148,163,184,0.5);
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.13em;
+        color: #e5e7eb;
+        margin-bottom: 0.4rem;
+    }
+    .hero-pill span.dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 999px;
+        background: radial-gradient(circle, #22c55e 0, #16a34a 40%, #166534 100%);
+        box-shadow: 0 0 14px rgba(34,197,94,0.8);
     }
 
-    /* Sidebar text */
-    [data-testid="stSidebar"] h2,
-    [data-testid="stSidebar"] h3,
-    [data-testid="stSidebar"] label,
-    [data-testid="stSidebar"] p {
-        color: #ffffff !important;
-        background-color: transparent !important;
+    /* Metric cards */
+    .metric-card {
+        border-radius: 1.1rem;
+        padding: 0.9rem 1.15rem 0.95rem;
+        background: linear-gradient(135deg,rgba(15,23,42,0.96),rgba(30,64,175,0.9));
+        border: 1px solid rgba(148,163,184,0.6);
+        box-shadow: 0 14px 32px rgba(15,23,42,0.75);
+        transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+        cursor: default;
     }
-
-    /* Inputs (dropdowns, text inputs, radios, checkboxes) */
-    [data-testid="stSidebar"] .st-bb,
-    [data-testid="stSidebar"] .st-af,
-    [data-testid="stSidebar"] .st-bg,
-    [data-testid="stSidebar"] .st-c8,
-    [data-testid="stSidebar"] .st-ci,
-    [data-testid="stSidebar"] input,
-    [data-testid="stSidebar"] select,
-    [data-testid="stSidebar"] textarea {
-        background-color: #1c2537 !important;
-        border: 1px solid #2d3a50 !important;
-        color: #e8ecf1 !important;
-        border-radius: 8px !important;
+    .metric-card:hover {
+        transform: translateY(-3px);
+        box-shadow: 0 18px 42px rgba(15,23,42,0.9);
+        border-color: rgba(251,146,60,0.9);
     }
-
-    /* File upload area */
-    [data-testid="stFileUploadDropzone"] {
-        background-color: #1c2537 !important;
-        border: 2px dashed #334155 !important;
+    .metric-label {
+        font-size: 0.72rem;
+        text-transform: uppercase;
+        letter-spacing: 0.16em;
+        color: #9ca3af;
+        margin-bottom: 0.05rem;
     }
-    [data-testid="stFileUploadDropzone"] * {
-        background-color: transparent !important;
-        color: #dfe6ee !important;
-    }
-
-    /* Radio buttons */
-    .stRadio > div > label > div:first-child {
-        background-color: #1c2537 !important;
-        border: 2px solid #94a3b8 !important;
-    }
-    .stRadio > div > label > div:first-child div {
-        background-color: #38bdf8 !important;
-    }
-
-    /* Checkbox styling */
-    .stCheckbox > div > label > div:first-child {
-        background-color: #1c2537 !important;
-        border: 2px solid #94a3b8 !important;
-    }
-    .stCheckbox > div > label > div:first-child svg {
-        stroke: #38bdf8 !important;
-    }
-
-    /* Spacing in sidebar */
-    [data-testid="stSidebar"] section {
-        margin-bottom: 1.5rem !important;
-    }
-    [data-testid="stSidebar"] .stFileUploader {
-        margin-top: 0.5rem !important;
-    }
-    [data-testid="stSidebar"] p {
-        color: #cdd5e0 !important;
-        font-size: 13px;
-    }
-
-    /* Header card */
-    .zalates-header {
-        padding: 1.0rem 1.2rem;
-        border-radius: 1rem;
-        background: linear-gradient(135deg, #1d4ed8 0%, #7c3aed 45%, #06b6d4 100%);
-        color: #ffffff;
-        margin-bottom: 0.5rem;
-    }
-    .zalates-header h2 {
-        margin-bottom: 0.2rem;
-    }
-    .zalates-header p {
-        margin-top: 0.1rem;
+    .metric-value {
+        font-size: 1.35rem;
+        font-weight: 700;
+        color: #f9fafb;
         margin-bottom: 0;
+    }
+    .metric-caption {
+        font-size: 0.78rem;
+        color: #e5e7eb;
+        opacity: 0.9;
+    }
+
+    /* Section headings with hover tooltips via title attribute */
+    .section-title {
+        font-size: 1.05rem;
+        font-weight: 700;
+        color: #facc15;
+        margin-top: 1.4rem;
+        margin-bottom: 0.2rem;
+        text-transform: uppercase;
+        letter-spacing: 0.14em;
+    }
+
+    /* Tabs styling */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 0.45rem;
+        background: rgba(15,23,42,0.95);
+        border-radius: 999px;
+        padding: 0.25rem;
+        border: 1px solid rgba(148,163,184,0.6);
+        box-shadow: 0 12px 30px rgba(15,23,42,0.7);
+    }
+    .stTabs [data-baseweb="tab"] {
+        border-radius: 999px !important;
+        padding: 0.25rem 0.9rem;
+        color: #e5e7eb;
+        font-size: 0.88rem;
+        font-weight: 500;
+    }
+    .stTabs [aria-selected="true"] {
+        background: linear-gradient(90deg,#fb923c,#f97316);
+        color: #111827 !important;
+    }
+
+    /* Dataframe cards */
+    .dataframe-card {
+        background: rgba(15,23,42,0.96);
+        border-radius: 1rem;
+        border: 1px solid rgba(148,163,184,0.6);
+        padding: 0.4rem 0.6rem 0.6rem;
+        box-shadow: 0 10px 26px rgba(15,23,42,0.9);
+    }
+
+    /* Make default text slightly brighter */
+    .stMarkdown, .stText, .stDataFrame {
+        color: #e5e7eb;
     }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-# Header with logo + title (better aligned)
-logo_path = "logo-png-circle2.png"  # ensure this file is in the repo root
-col_logo, col_title = st.columns([1, 5])
-with col_logo:
-    if os.path.exists(logo_path):
-        st.image(logo_path, use_column_width=True)
-with col_title:
+# ---------------- OPENAI CONFIG -------------------
+openai.api_key = st.secrets.get("OPENAI_API_KEY", "")
+
+if not openai.api_key:
+    st.warning(
+        "⚠️ OpenAI API key not set in Streamlit secrets. "
+        "AI narrative features will be disabled."
+    )
+
+# ---------------- HERO / HEADER -------------------
+with st.container():
+    col_h1, col_h2 = st.columns([2.5, 1.5])
+
+    with col_h1:
+        st.markdown(
+            """
+            <div class="hero-card" title="Hover: This assistant unifies food security, nutrition and youth data into one interactive, AI-ready dashboard.">
+                <div class="hero-pill">
+                    <span class="dot"></span>
+                    AI DATA PIPELINE • FOOD, NUTRITION & YOUTH
+                </div>
+                <div class="hero-title">
+                    AI Food Security, Nutrition & Youth Development Analysis Assistant
+                </div>
+                <div class="hero-subtitle">
+                    Ingest survey data or Kobo submissions, clean and harmonize indicators, and explore 
+                    interactive fall-coloured dashboards for food security, dietary diversity and youth agency — 
+                    with optional AI narrative reporting.
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with col_h2:
+        st.markdown(
+            """
+            <div style="display:flex;flex-direction:column;gap:0.65rem;margin-top:0.2rem;">
+                <div class="metric-card" title="Synthetic sample data loads automatically so you can explore the dashboard before uploading real data.">
+                    <div class="metric-label">Pipeline status</div>
+                    <div class="metric-value">Live & Ready</div>
+                    <div class="metric-caption">Synthetic demo data starts automatically.</div>
+                </div>
+                <div class="metric-card" title="KoboToolbox, CSV, Excel, JSON, TSV, Stata and SPSS are supported for ingest.">
+                    <div class="metric-label">Data sources</div>
+                    <div class="metric-value">Multi-format</div>
+                    <div class="metric-caption">Upload files or pull directly from KoboToolbox.</div>
+                </div>
+                <div class="metric-card" title="Hover over charts to see precise values, percentages and categories.">
+                    <div class="metric-label">Visuals</div>
+                    <div class="metric-value">Interactive</div>
+                    <div class="metric-caption">Hover for rich tooltips & breakdowns.</div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+# ==================================================
+# SCORING HELPERS: HFIAS / HDDS / WDDS
+# ==================================================
+def categorize_hfias(score):
+    """Categorize HFIAS score into standard severity groups."""
+    if pd.isna(score):
+        return np.nan
+    if score <= 1:
+        return "Food secure"
+    elif 2 <= score <= 8:
+        return "Mildly food insecure"
+    elif 9 <= score <= 16:
+        return "Moderately food insecure"
+    else:
+        return "Severely food insecure"
+
+
+def compute_hfias_scores(
+    df: pd.DataFrame,
+    question_cols=None,
+    score_col: str = "hfias_score",
+    category_col: str = "hfias_category",
+):
+    """
+    Compute HFIAS total score and severity category.
+    """
+    if question_cols is None:
+        question_cols = [c for c in df.columns if c.lower().startswith("hfias_q")]
+
+    if not question_cols:
+        return df  # nothing to do
+
+    df[score_col] = df[question_cols].sum(axis=1)
+    df[category_col] = df[score_col].apply(categorize_hfias)
+    return df
+
+
+def compute_dietary_diversity_score(
+    df: pd.DataFrame,
+    food_group_cols,
+    score_col: str = "dds_score",
+    max_score: int | None = None,
+):
+    """
+    Compute dietary diversity score (HDDS or WDDS) as the sum of binary food group indicators.
+    """
+    if not food_group_cols:
+        return df
+
+    # Treat any positive value as 1 (consumed)
+    binary = df[food_group_cols].gt(0).astype(int)
+    df[score_col] = binary.sum(axis=1)
+
+    if max_score is not None:
+        df[score_col] = df[score_col].clip(upper=max_score)
+
+    return df
+
+
+# ==================================================
+# DUMMY DATASET GENERATORS (NOW USING THE SCORERS)
+# ==================================================
+def create_dummy_hfias(n=500):
+    np.random.seed(42)
+    df = pd.DataFrame(
+        {
+            "hhid": range(1, n + 1),
+            "region": np.random.choice(["North", "South", "East", "West"], n),
+            "sex_head": np.random.choice(["Male", "Female"], n),
+            "hfias_q1": np.random.randint(0, 4, n),
+            "hfias_q2": np.random.randint(0, 4, n),
+            "hfias_q3": np.random.randint(0, 4, n),
+            "hfias_q4": np.random.randint(0, 4, n),
+            "hfias_q5": np.random.randint(0, 4, n),
+            "hfias_q6": np.random.randint(0, 4, n),
+            "hfias_q7": np.random.randint(0, 4, n),
+            "hfias_q8": np.random.randint(0, 4, n),
+            "hfias_q9": np.random.randint(0, 4, n),
+        }
+    )
+
+    question_cols = [f"hfias_q{i}" for i in range(1, 10)]
+    df = compute_hfias_scores(
+        df,
+        question_cols=question_cols,
+        score_col="hfias_score",
+        category_col="hfias_category",
+    )
+    return df
+
+
+def create_dummy_wdds(n=500):
+    np.random.seed(43)
+    df = pd.DataFrame(
+        {
+            "id": range(1, n + 1),
+            "age": np.random.randint(15, 49, n),
+            "sex": "Female",
+            "region": np.random.choice(["Urban", "Rural"], n),
+            "education": np.random.choice(
+                ["None", "Primary", "Secondary", "Tertiary"], n
+            ),
+        }
+    )
+
+    # 9 WDDS food group indicators (binary)
+    for i in range(1, 10):
+        df[f"wdds_fg{i}"] = np.random.binomial(1, 0.6, n)
+
+    food_groups = [f"wdds_fg{i}" for i in range(1, 10)]
+    df = compute_dietary_diversity_score(
+        df, food_group_cols=food_groups, score_col="wdds", max_score=9
+    )
+    return df
+
+
+def create_dummy_child_malnutrition(n=500):
+    np.random.seed(44)
+    df = pd.DataFrame(
+        {
+            "child_id": range(1, n + 1),
+            "age_months": np.random.randint(6, 60, n),
+            "sex": np.random.choice(["Male", "Female"], n),
+            "weight_kg": np.round(np.random.normal(12, 2.5, n), 1),
+            "height_cm": np.round(np.random.normal(90, 8, n), 1),
+            "wfh_zscore": np.round(np.random.normal(-0.5, 1.2, n), 2),
+        }
+    )
+    df["malnutrition_type"] = pd.cut(
+        df["wfh_zscore"],
+        bins=[-10, -3, -2, 100],
+        labels=["Severe wasting", "Moderate wasting", "Normal"],
+    )
+    return df
+
+
+def create_dummy_consumption_production(n=500):
+    np.random.seed(45)
+    df = pd.DataFrame(
+        {
+            "hhid": range(1, n + 1),
+            "region": np.random.choice(["North", "South", "East", "West"], n),
+            "monthly_food_expense": np.round(np.random.normal(120, 40, n), 2),
+            "monthly_income": np.round(np.random.normal(300, 100, n), 2),
+            "produces_own_food": np.random.choice([0, 1], n),
+            "livestock_count": np.random.poisson(3, n),
+        }
+    )
+
+    # 12 HDDS food group indicators (binary)
+    for i in range(1, 13):
+        df[f"hdds_fg{i}"] = np.random.binomial(1, 0.7, n)
+
+    food_groups = [f"hdds_fg{i}" for i in range(1, 13)]
+    df = compute_dietary_diversity_score(
+        df, food_group_cols=food_groups, score_col="hdds", max_score=12
+    )
+    return df
+
+
+def create_dummy_youth_decision(n=500):
+    np.random.seed(46)
+    df = pd.DataFrame(
+        {
+            "youth_id": range(1, n + 1),
+            "age": np.random.randint(15, 29, n),
+            "sex": np.random.choice(["Male", "Female"], n),
+            "education": np.random.choice(
+                ["None", "Primary", "Secondary", "Tertiary"], n
+            ),
+            "employment_status": np.random.choice(
+                ["Unemployed", "Employed", "Self-employed", "Student"], n
+            ),
+            "decision_power_score": np.random.randint(1, 6, n),
+            "agency_score": np.random.randint(1, 6, n),
+            "hope_future_score": np.random.randint(1, 6, n),
+            "financial_literacy_score": np.random.randint(1, 6, n),
+            "empathy_score": np.random.randint(1, 6, n),
+            "participation_score": np.random.randint(1, 6, n),
+        }
+    )
+    df["received_training"] = np.random.choice([0, 1], n)
+    return df
+
+
+def create_dummy_integrated(n=500):
+    np.random.seed(47)
+    df = pd.DataFrame(
+        {
+            "hhid": range(1, n + 1),
+            "region": np.random.choice(["North", "South", "East", "West"], n),
+            "sex_head": np.random.choice(["Male", "Female"], n),
+            "monthly_income": np.round(np.random.normal(320, 120, n), 2),
+            "monthly_food_expense": np.round(np.random.normal(130, 45, n), 2),
+            "youth_in_household": np.random.randint(0, 4, n),
+            "youth_decision_score": np.random.randint(1, 6, n),
+            "youth_agency_score": np.random.randint(1, 6, n),
+        }
+    )
+
+    # HFIAS questions
+    for i in range(1, 10):
+        df[f"hfias_q{i}"] = np.random.randint(0, 4, n)
+    df = compute_hfias_scores(
+        df,
+        question_cols=[f"hfias_q{i}" for i in range(1, 10)],
+        score_col="hfias_score",
+        category_col="hfias_category",
+    )
+
+    # HDDS groups (12)
+    for i in range(1, 13):
+        df[f"hdds_fg{i}"] = np.random.binomial(1, 0.7, n)
+    df = compute_dietary_diversity_score(
+        df,
+        food_group_cols=[f"hdds_fg{i}" for i in range(1, 13)],
+        score_col="hdds",
+        max_score=12,
+    )
+
+    # WDDS groups (9)
+    for i in range(1, 10):
+        df[f"wdds_fg{i}"] = np.random.binomial(1, 0.6, n)
+    df = compute_dietary_diversity_score(
+        df,
+        food_group_cols=[f"wdds_fg{i}" for i in range(1, 10)],
+        score_col="wdds",
+        max_score=9,
+    )
+
+    return df
+
+
+# ==================================================
+# SIDEBAR: CHOOSE SAMPLE / UPLOAD / KOBO
+# ==================================================
+st.sidebar.header("🔌 Data Source")
+
+data_source = st.sidebar.radio(
+    "Choose data source:",
+    ["Use sample (dummy) dataset", "Upload your own dataset", "Load from KoboToolbox"],
+    help="Synthetic sample data is loaded automatically so you can explore the dashboard immediately.",
+)
+
+df = None
+dataset_label = None
+
+# ---------- 1) SAMPLE (DUMMY) DATA ----------
+if data_source == "Use sample (dummy) dataset":
+    sample_choice = st.sidebar.selectbox(
+        "Select sample dataset",
+        [
+            "HFIAS household food insecurity",
+            "Women’s dietary diversity (WDDS)",
+            "Child malnutrition / anthropometry",
+            "Food consumption & production",
+            "Youth development & decision-making",
+            "Integrated multi-topic dataset",
+        ],
+        help="Hover over charts in the main area to explore this sample interactively.",
+    )
+
+    if sample_choice == "HFIAS household food insecurity":
+        df = create_dummy_hfias()
+        dataset_label = "Dummy HFIAS dataset"
+    elif sample_choice == "Women’s dietary diversity (WDDS)":
+        df = create_dummy_wdds()
+        dataset_label = "Dummy WDDS dataset"
+    elif sample_choice == "Child malnutrition / anthropometry":
+        df = create_dummy_child_malnutrition()
+        dataset_label = "Dummy child malnutrition dataset"
+    elif sample_choice == "Food consumption & production":
+        df = create_dummy_consumption_production()
+        dataset_label = "Dummy consumption & production dataset"
+    elif sample_choice == "Youth development & decision-making":
+        df = create_dummy_youth_decision()
+        dataset_label = "Dummy youth decision-making dataset"
+    elif sample_choice == "Integrated multi-topic dataset":
+        df = create_dummy_integrated()
+        dataset_label = "Dummy integrated dataset"
+
+# ---------- 2) UPLOAD LOCAL FILE ----------
+elif data_source == "Upload your own dataset":
+    uploaded_file = st.sidebar.file_uploader(
+        "Upload CSV, Excel, JSON, TSV, Stata, SPSS, or PDF file",
+        type=["csv", "xlsx", "xls", "json", "tsv", "txt", "dta", "sav", "pdf"],
+    )
+    if uploaded_file is not None:
+        try:
+            name = uploaded_file.name.lower()
+            if name.endswith(".csv"):
+                df = pd.read_csv(uploaded_file)
+            elif name.endswith((".xlsx", ".xls")):
+                df = pd.read_excel(uploaded_file)
+            elif name.endswith(".json"):
+                df = pd.read_json(uploaded_file)
+            elif name.endswith((".tsv", ".txt")):
+                df = pd.read_csv(uploaded_file, sep="\t")
+            elif name.endswith(".dta"):
+                df = pd.read_stata(uploaded_file)
+            elif name.endswith(".sav"):
+                import pyreadstat
+
+                df, meta = pyreadstat.read_sav(uploaded_file)
+            elif name.endswith(".pdf"):
+                try:
+                    import pdfplumber
+
+                    pages = []
+                    with pdfplumber.open(uploaded_file) as pdf:
+                        for i, page in enumerate(pdf.pages):
+                            text = page.extract_text() or ""
+                            pages.append({"page": i + 1, "text": text})
+                    df = pd.DataFrame(pages)
+                    dataset_label = "PDF text (page-level) dataset"
+                    st.info(
+                        "📄 PDF loaded as page-level text. You can generate AI narrative "
+                        "from this text, but numeric analysis may be limited."
+                    )
+                except Exception as e:
+                    st.error(
+                        f"Error reading PDF with pdfplumber: {e}. "
+                        "Check that 'pdfplumber' is in your requirements.txt."
+                    )
+                    df = None
+            else:
+                st.error("Unsupported file format.")
+        except Exception as e:
+            st.error(f"Error loading file: {e}")
+
+# ---------- 3) LOAD FROM KOBOTOOLBOX ----------
+elif data_source == "Load from KoboToolbox":
+    st.sidebar.markdown("### 🌐 KoboToolbox Connection")
+
+    kobo_server = st.sidebar.text_input(
+        "Kobo server URL",
+        value="https://eu.kobotoolbox.org",
+        help="Example: https://kf.kobotoolbox.org or https://eu.kobotoolbox.org",
+    )
+
+    default_kobo_token = st.secrets.get("KOBO_TOKEN", "")
+    kobo_token = st.sidebar.text_input(
+        "Kobo API Token",
+        type="password",
+        value=default_kobo_token,
+        help="Paste your Kobo API token here (Profile → API token). "
+        "For deployment, set KOBO_TOKEN in Streamlit secrets instead of hardcoding.",
+    )
+
+    kobo_asset_uid = st.sidebar.text_input(
+        "Form / Asset UID",
+        value="aRcHyjoYEn6fCkHuEX4QYm",
+        help="The UID of your Kobo form (e.g., aRcHyjoYEn6fCkHuEX4QYm).",
+    )
+
+    load_kobo = st.sidebar.button("Load data from Kobo")
+
+    if load_kobo:
+        if not (kobo_server and kobo_token and kobo_asset_uid):
+            st.error("Please provide server URL, API token, and asset UID.")
+        else:
+            try:
+                kobo_server = kobo_server.rstrip("/")
+                url = f"{kobo_server}/api/v2/assets/{kobo_asset_uid}/data/?format=json"
+
+                headers = {
+                    "Authorization": f"Token {kobo_token}",
+                }
+
+                st.info("Requesting data from KoboToolbox...")
+                resp = requests.get(url, headers=headers)
+
+                if resp.status_code != 200:
+                    st.error(
+                        f"Error fetching data from Kobo (status {resp.status_code}): "
+                        f"{resp.text[:400]}"
+                    )
+                else:
+                    data_json = resp.json()
+
+                    if "results" in data_json:
+                        records = data_json["results"]
+                    else:
+                        records = data_json
+
+                    if not records:
+                        st.warning("No submissions found for this asset.")
+                    else:
+                        df = pd.DataFrame.from_records(records)
+                        dataset_label = f"Kobo data (asset {kobo_asset_uid})"
+                        st.success("Data loaded successfully from KoboToolbox.")
+
+                        # Optional: drop Kobo system columns (starting with "_")
+                        system_cols = [c for c in df.columns if c.startswith("_")]
+                        if system_cols:
+                            st.info(
+                                f"Dropping Kobo system columns from analysis: {system_cols}"
+                            )
+                            df = df.drop(columns=system_cols)
+
+            except Exception as e:
+                st.error(f"Error loading data from KoboToolbox: {e}")
+
+# ---------- Final check ----------
+if df is None:
+    st.info(
+        "Select a sample dataset, upload a file, or load from KoboToolbox to begin. "
+        "Sample HFIAS data is selected by default on first load."
+    )
+    st.stop()
+
+# Basic overview + tabs
+numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
+categorical_cols = df.select_dtypes(exclude=np.number).columns.tolist()
+
+tab_overview, tab_auto, tab_desc, tab_ai = st.tabs(
+    ["📂 Overview", "📈 Auto Insights", "📊 Descriptives & Crosstabs", "🧠 AI Narrative & Downloads"]
+)
+
+narrative_chunks = []
+
+# ==================================================
+# OVERVIEW TAB
+# ==================================================
+with tab_overview:
     st.markdown(
-        '<div class="zalates-header">'
-        '<h2>🧹 Zalates Analytics – AI Data-Cleaning, Integration & Risk Dashboards</h2>'
-        '<p>Clean, harmonize, and analyze data for feasibility, food security, and business risk decisions.</p>'
-        '</div>',
+        '<div class="section-title" title="Quick overview of the dataset you are analyzing.">'
+        "DATA SNAPSHOT"
+        "</div>",
         unsafe_allow_html=True,
     )
 
-# --- Sidebar options ---
-st.sidebar.subheader("Data Inputs")
+    c1, c2, c3 = st.columns([1.4, 1.4, 1.2])
+    with c1:
+        st.markdown(
+            f"""
+            <div class="metric-card" title="Total number of observations currently loaded.">
+                <div class="metric-label">Rows</div>
+                <div class="metric-value">{df.shape[0]:,}</div>
+                <div class="metric-caption">Survey records / respondents</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with c2:
+        st.markdown(
+            f"""
+            <div class="metric-card" title="Total number of variables currently loaded.">
+                <div class="metric-label">Columns</div>
+                <div class="metric-value">{df.shape[1]:,}</div>
+                <div class="metric-caption">Indicators & attributes</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with c3:
+        st.markdown(
+            f"""
+            <div class="metric-card" title="How many numeric vs. categorical variables are detected.">
+                <div class="metric-label">Variable mix</div>
+                <div class="metric-value">{len(numeric_cols)} / {len(categorical_cols)}</div>
+                <div class="metric-caption">Numeric / categorical</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-use_synthetic = st.sidebar.checkbox("Use synthetic example dataset (test mode)", value=False)
-
-uploaded_files = st.sidebar.file_uploader(
-    "Upload one or more datasets",
-    accept_multiple_files=True,
-    type=["csv", "xlsx", "xls", "dta", "sav", "json", "pkl", "pickle", "tsv", "txt"],
-)
-
-st.sidebar.caption(
-    "Tip: For GPS maps, include `latitude` / `longitude` (or `lat` / `lon`) and a "
-    "food security indicator (e.g., `hfias`, `fcs`, `dds`, `food_security_cat`)."
-)
-
-# Collect raw dfs
-dfs_raw: Dict[str, pd.DataFrame] = {}
-
-if use_synthetic:
-    dfs_raw["synthetic.csv"] = generate_synthetic_dataset()
-
-if uploaded_files:
-    for uf in uploaded_files:
-        try:
-            df = load_file(uf)
-            dfs_raw[uf.name] = df
-        except Exception as e:
-            st.error(f"❌ Could not read file `{uf.name}`: {e}")
-
-if not dfs_raw:
-    st.info("Use the sidebar to upload files and/or enable synthetic data to begin.")
-    st.stop()
-
-# 1️⃣ Preview raw datasets
-st.subheader("1️⃣ Preview of Uploaded Datasets")
-for fname, df in dfs_raw.items():
-    with st.expander(f"File: {fname} (shape={df.shape})", expanded=False):
-        st.write("Columns:", list(df.columns))
-        st.dataframe(df.head(10))
-
-# Normalize column names
-dfs_norm: Dict[str, pd.DataFrame] = {}
-col_maps: Dict[str, Dict[str, str]] = {}
-for fname, df in dfs_raw.items():
-    ndf, cmap = normalize_column_names(df)
-    dfs_norm[fname] = ndf
-    col_maps[fname] = cmap
-
-# 2️⃣ Schema summary
-st.subheader("2️⃣ Schema Summary (normalized names)")
-schema_df = get_schema_summary(dfs_norm)
-st.dataframe(schema_df)
-
-# 3️⃣ Column similarity & harmonization
-st.subheader("3️⃣ Column Similarity & Harmonization")
-
-harmonization_mappings: Dict[str, Dict[str, str]] = {fname: {} for fname in dfs_norm.keys()}
-
-suggestions = suggest_similar_columns(dfs_norm)
-if suggestions:
-    st.write(
-        "The agent suggests that some variables are likely the **same concept** across datasets.\n"
-        "By default, they will be harmonized to a common name when you approve.\n"
-        "✅ Only mark them as separate if you are sure they should remain different."
+    st.markdown(
+        f"**Dataset loaded:** `{dataset_label or 'Uploaded dataset'}` &nbsp;·&nbsp; "
+        f"Shape: **{df.shape[0]:,} rows × {df.shape[1]:,} columns**"
     )
 
-    for idx, (f1, c1, c2) in enumerate(suggestions):
-        st.markdown(f"- Suggested match: `{c1}` in **{f1}** ↔ `{c2}` in another file")
-        keep_separate = st.checkbox(
-            "Keep these separate (do NOT harmonize)",
-            key=f"suggest_unrelated_{idx}",
+    with st.expander("🔍 Preview first rows & data types", expanded=True):
+        st.markdown('<div class="dataframe-card">', unsafe_allow_html=True)
+        st.dataframe(df.head())
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        st.write("**Numeric columns**", numeric_cols)
+        st.write("**Categorical/text columns**", categorical_cols)
+
+    if dataset_label and "Kobo" in dataset_label:
+        st.info(
+            "Kobo dataset detected — the assistant will summarize numeric indicators and key text/categorical fields. "
+            "Use the Descriptives tab for detailed breakdowns."
         )
-        if not keep_separate:
-            base = c1
-            harmonization_mappings[f1][c1] = base
-            for fname, df in dfs_norm.items():
-                if c2 in df.columns:
-                    harmonization_mappings[fname][c2] = base
-else:
-    st.write("No strong column similarity suggestions found. You can still harmonize manually.")
 
-st.markdown("**Manual harmonization (optional)**")
-with st.expander("Map columns manually to a standard name", expanded=False):
-    for fname, df in dfs_norm.items():
-        st.markdown(f"**File: {fname}**")
-        for col in df.columns:
-            new_name = st.text_input(
-                f"Standard name for `{col}` in {fname} (leave blank to keep)",
-                value="",
-                key=f"manual_{fname}_{col}",
-            )
-            if new_name:
-                harmonization_mappings[fname][col] = new_name
-
-if st.button("Apply harmonization"):
-    st.session_state["harmonized_dfs"] = harmonize_columns(dfs_norm, harmonization_mappings)
-    st.success("Harmonization applied.")
-else:
-    if "harmonized_dfs" not in st.session_state:
-        st.session_state["harmonized_dfs"] = dfs_norm
-
-harmonized_dfs: Dict[str, pd.DataFrame] = st.session_state["harmonized_dfs"]
-
-# 4️⃣ Integration (append/merge) + automatic cleaning (default)
-st.subheader("4️⃣ Integrate & Auto-Clean (default)")
-
-integration_mode = st.radio(
-    "Integration mode",
-    ["Append (stack rows)", "Merge (join on ID)"],
-    index=0,  # default to Append
+# ==================================================
+# ANALYSIS MODE: AI AUTO vs SCRIPT
+# ==================================================
+st.sidebar.header("⚙️ Analysis Mode")
+analysis_mode = st.sidebar.radio(
+    "Choose analysis mode",
+    ["AI auto-detect analysis", "Use custom analysis script"],
 )
 
-integrate_and_clean = st.button("Run integration + automatic cleaning")
+st.sidebar.header("📊 Descriptive & Crosstab Options")
 
-if integrate_and_clean:
-    # Integration
-    if integration_mode == "Append (stack rows)":
-        integrated_df = safely_append(harmonized_dfs)
-        integrated_df = collapse_semantic_groups(integrated_df)
-        st.success(f"Appended {len(harmonized_dfs)} datasets. Result shape: {integrated_df.shape}")
-    else:
-        st.write("Select the key column for merging (e.g., `id`, `hhid`, `household_id`).")
-        candidate_ids = set()
-        for df in harmonized_dfs.values():
-            for c in df.columns:
-                if any(k in c.lower() for k in ["id", "hhid", "household"]):
-                    candidate_ids.add(c)
-        candidate_ids = sorted(candidate_ids)
-        if not candidate_ids:
-            st.warning("No obvious ID columns found. Type the key manually if you know it.")
-        key = st.text_input("Merge key column name:", value=candidate_ids[0] if candidate_ids else "")
-        merge_type = st.selectbox("Merge type", ["outer", "inner", "left", "right"], index=0)
-
-        if not key:
-            st.error("Please specify a key column for merging.")
-            st.stop()
-
-        integrated_df = safely_merge(harmonized_dfs, key=key, how=merge_type)
-        if integrated_df.empty:
-            st.stop()
-        integrated_df = collapse_semantic_groups(integrated_df)
-        st.success(f"Merged datasets on `{key}`. Result shape: {integrated_df.shape}")
-
-    # Save integrated df
-    st.session_state["integrated_df"] = integrated_df
-
-    # Automatic cleaning (DEFAULT PATH)
-    df_clean = integrated_df.copy()
-    df_clean = strong_numeric_cleaning(df_clean)
-    df_clean = auto_impute_categorical_missing(df_clean)
-    df_clean = auto_fix_age_education_inconsistencies(df_clean)
-    df_clean = auto_fix_employment_income_inconsistencies(df_clean)
-    df_clean = final_post_clean(df_clean)  # remove placeholder NA/nan & empty rows
-
-    st.session_state["cleaned_df_auto"] = df_clean
-
-# If integration not yet run, stop here
-if "integrated_df" not in st.session_state or "cleaned_df_auto" not in st.session_state:
-    st.info("Click **Run integration + automatic cleaning** to continue.")
-    st.stop()
-
-integrated_df = st.session_state["integrated_df"]
-cleaned_df_auto = st.session_state["cleaned_df_auto"]
-
-# 5️⃣ Data-quality assessment BEFORE vs AFTER
-st.subheader("5️⃣ Data-Quality Assessment – BEFORE vs AFTER Automatic Cleaning")
-
-miss_before = detect_missingness(integrated_df)
-miss_after = detect_missingness(cleaned_df_auto)
-ext_before = detect_numeric_extremes(integrated_df)
-ext_after = detect_numeric_extremes(cleaned_df_auto)
-logical_msgs_before = detect_logical_inconsistencies(integrated_df)
-logical_msgs_after = detect_logical_inconsistencies(cleaned_df_auto)
-
-col1, col2 = st.columns(2)
-with col1:
-    st.markdown("**Missing values – BEFORE cleaning**")
-    st.dataframe(miss_before)
-with col2:
-    st.markdown("**Missing values – AFTER cleaning**")
-    st.dataframe(miss_after)
-
-st.markdown("**Numeric extremes & impossible values – BEFORE cleaning**")
-st.dataframe(ext_before)
-
-st.markdown("**Numeric extremes & impossible values – AFTER cleaning**")
-st.dataframe(ext_after)
-
-with st.expander("Logical inconsistencies – BEFORE cleaning", expanded=False):
-    if logical_msgs_before:
-        for m in logical_msgs_before:
-            st.warning(m)
-    else:
-        st.write("No simple logical inconsistencies detected by current rules.")
-
-with st.expander("Logical inconsistencies – AFTER cleaning", expanded=False):
-    if logical_msgs_after:
-        for m in logical_msgs_after:
-            st.warning(m)
-    else:
-        st.write("No simple logical inconsistencies detected after cleaning rules.")
-
-# 6️⃣ Ask user if they accept automatic cleaning
-st.subheader("6️⃣ Do you accept the automatic cleaning result?")
-
-choice = st.radio(
-    "Choose which dataset you want to continue with:",
-    [
-        "✅ Yes – use the automatically cleaned dataset",
-        "❌ No – keep the integrated but uncleaned dataset (manual cleaning)",
-    ],
-    index=0,
+selected_numeric_by_group = st.sidebar.multiselect(
+    "Numeric variables for descriptive by categories (mean, std, etc.)",
+    options=numeric_cols,
 )
 
-if choice.startswith("✅"):
-    final_df = cleaned_df_auto
-    st.success("Using AUTOMATICALLY CLEANED dataset for dashboards and download.")
-else:
-    final_df = integrated_df
-    st.warning("Using INTEGRATED BUT UNCLEANED dataset. You can clean it manually or offline.")
-
-st.subheader("7️⃣ Final Dataset Preview")
-st.dataframe(final_df.head(100))
-st.write("Shape:", final_df.shape)
-
-# Download final dataset
-st.subheader("8️⃣ Download Final Dataset")
-csv_bytes = final_df.to_csv(index=False).encode("utf-8")
-st.download_button(
-    label="⬇️ Download final dataset as CSV",
-    data=csv_bytes,
-    file_name="final_data_clean_or_raw.csv",
-    mime="text/csv",
+selected_group_vars = st.sidebar.multiselect(
+    "Grouping categorical variables (e.g., region, sex, education)",
+    options=categorical_cols,
 )
 
-# 9️⃣ Optional ML-based anomaly detection
-st.subheader("9️⃣ Optional: ML-based Anomaly Detection (Isolation Forest)")
+crosstab_var1 = st.sidebar.selectbox(
+    "Crosstab variable 1 (categorical)",
+    ["(none)"] + categorical_cols if categorical_cols else ["(none)"],
+)
 
-run_ml = st.checkbox("Run Isolation Forest anomaly detection on numeric variables")
+crosstab_var2 = st.sidebar.selectbox(
+    "Crosstab variable 2 (categorical)",
+    ["(none)"] + categorical_cols if categorical_cols else ["(none)"],
+)
 
-if run_ml:
-    contamination = st.slider("Anomaly proportion (contamination)", 0.01, 0.2, 0.05, 0.01)
-    anomaly_flag = run_isolation_forest(final_df, contamination=contamination)
-    if anomaly_flag.sum() > 0:
-        st.warning(f"Isolation Forest flagged {int(anomaly_flag.sum())} potential anomalous records.")
-        st.dataframe(final_df[anomaly_flag == 1].head(50))
+selected_cats_for_freq = st.sidebar.multiselect(
+    "Categorical variables for frequency plots (bar/pie)",
+    options=categorical_cols,
+)
+
+# ==================================================
+# TAB: AUTO / CUSTOM ANALYSIS (FOOD & YOUTH)
+# ==================================================
+with tab_auto:
+    if analysis_mode == "Use custom analysis script":
+        st.markdown(
+            '<div class="section-title" title="Use Stata, SPSS or Python syntax as guidance for analysis.">'
+            "CUSTOM SCRIPT–DRIVEN ANALYSIS"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+        script_type = st.selectbox(
+            "Type of script you want to reference",
+            ["Stata (.do)", "SPSS (.sps)", "Python code (text)"],
+        )
+
+        script_text = st.text_area(
+            "Paste your analysis script here (for now, used as guidance for AI + summaries)",
+            height=200,
+            placeholder="Paste your .do / .sps / Python logic here...",
+        )
+
+        st.markdown("#### Basic descriptive analysis based on your dataset")
+        if numeric_cols:
+            desc = df[numeric_cols].describe().T
+            st.dataframe(desc)
+            narrative_chunks.append(
+                "Descriptive statistics (custom script mode):\n" + desc.to_string()
+            )
+        else:
+            st.warning("No numeric columns detected for descriptive statistics.")
+
+        st.info(
+            "This version summarizes your data and can use the script text "
+            "as context for the AI narrative. You can extend it later to parse "
+            "and mirror Stata/SPSS logic."
+        )
+
     else:
-        st.write("No anomalies flagged (or model not run).")
+        # ==================================================
+        # AI AUTO-DETECT ANALYSIS MODE
+        # ==================================================
+        st.markdown(
+            '<div class="section-title" title="Automatically detect HFIAS, HDDS/WDDS, anthropometry and youth indicators.">'
+            "AUTO-DETECTED FOOD SECURITY & YOUTH ANALYSIS"
+            "</div>",
+            unsafe_allow_html=True,
+        )
 
-# =========================================
-# 🔟 EDA & DASHBOARD PAGES (via sidebar)
-# =========================================
+        # ------------------ HFIAS ------------------
+        if "hfias_score" in df.columns:
+            st.markdown("##### HFIAS severity & distribution")
 
-numeric_cols_all = list(final_df.select_dtypes(include=[np.number]).columns)
-cat_cols_all = list(final_df.select_dtypes(include=["object", "category"]).columns)
+            hfias = df["hfias_score"]
+            st.write("HFIAS score descriptive statistics:")
+            st.dataframe(hfias.describe().to_frame().T)
 
-st.sidebar.subheader("Analytics workspace")
-page = st.sidebar.radio(
-    "Select analysis page",
-    [
-        "Summary & EDA",
-        "Visualizations",
-        "Slicer / Cross-tabs",
-        "Narrative summary",
-    ],
-)
-
-st.markdown("---")
-
-if not numeric_cols_all and not cat_cols_all:
-    st.write("No numeric or categorical variables available for analysis.")
-else:
-    # ===== Page 1: Summary & EDA =====
-    if page == "Summary & EDA":
-        st.subheader("📋 Summary & EDA (descriptive statistics)")
-
-        if numeric_cols_all:
-            st.markdown("**Numeric variables – descriptive statistics**")
-            st.dataframe(final_df[numeric_cols_all].describe().T)
-        else:
-            st.info("No numeric variables for descriptive statistics.")
-
-        if cat_cols_all:
-            st.markdown("**Categorical variables – top categories**")
-            for col in cat_cols_all[:10]:
-                with st.expander(f"Variable: {col}", expanded=False):
-                    st.write(final_df[col].value_counts(dropna=True).head(15))
-        else:
-            st.info("No categorical variables detected.")
-
-        if len(numeric_cols_all) > 1:
-            st.markdown("**Correlation matrix (numeric only)**")
-            corr = final_df[numeric_cols_all].corr()
-            st.dataframe(corr.style.background_gradient(cmap="coolwarm"))
-        else:
-            st.info("Not enough numeric variables for correlation matrix.")
-
-    # ===== Page 2: Visualizations =====
-    elif page == "Visualizations":
-        st.subheader("📊 Visualizations")
-
-        # --- Numeric visualizations: histogram + line chart ---
-        st.markdown("### Numeric variables (histogram & line chart)")
-        if numeric_cols_all:
-            num_var = st.selectbox(
-                "Choose numeric variable",
-                numeric_cols_all,
-                key="viz_num",
-            )
-            numeric_series = final_df[num_var].dropna()
-
-            if not numeric_series.empty:
-                col_hist, col_line = st.columns(2)
-
-                with col_hist:
-                    st.markdown("**Histogram**")
-                    fig_hist = px.histogram(
-                        numeric_series,
-                        nbins=30,
-                        labels={"value": num_var},
-                        title=f"Distribution of {num_var}",
-                    )
-                    st.plotly_chart(fig_hist, use_container_width=True)
-
-                with col_line:
-                    st.markdown("**Line plot (sorted values)**")
-                    sorted_series = numeric_series.sort_values().reset_index(drop=True)
-                    fig_line = px.line(
-                        sorted_series,
-                        labels={"index": "sorted index", "value": num_var},
-                        title=f"Sorted values of {num_var}",
-                    )
-                    st.plotly_chart(fig_line, use_container_width=True)
-            else:
-                st.info("Selected numeric variable has only missing values.")
-        else:
-            st.info("No numeric variables available for plotting.")
-
-        # --- Categorical visualizations: bar (vertical/horizontal) + pie ---
-        st.markdown("### Categorical variables (bar & pie charts)")
-        if cat_cols_all:
-            cat_var = st.selectbox(
-                "Choose categorical variable",
-                cat_cols_all,
-                key="viz_cat",
-            )
-            cat_counts = (
-                final_df[cat_var]
-                .value_counts(dropna=True)
-                .head(15)
-            )
-
-            if not cat_counts.empty:
-                cat_df = cat_counts.reset_index()
-                cat_df.columns = [cat_var, "count"]
-
-                col_bar_v, col_bar_h = st.columns(2)
-
-                with col_bar_v:
-                    st.markdown("**Vertical bar chart**")
-                    fig_bar_v = px.bar(
-                        cat_df,
-                        x=cat_var,
-                        y="count",
-                        title=f"{cat_var}: counts (top 15)",
-                    )
-                    st.plotly_chart(fig_bar_v, use_container_width=True)
-
-                with col_bar_h:
-                    st.markdown("**Horizontal bar chart**")
-                    fig_bar_h = px.bar(
-                        cat_df,
-                        x="count",
-                        y=cat_var,
-                        orientation="h",
-                        title=f"{cat_var}: counts (horizontal)",
-                    )
-                    st.plotly_chart(fig_bar_h, use_container_width=True)
-
-                st.markdown("**Pie chart**")
-                fig_pie = px.pie(
-                    cat_df,
-                    names=cat_var,
-                    values="count",
-                    title=f"{cat_var}: share of categories",
+            cat_col = "hfias_category" if "hfias_category" in df.columns else None
+            if not cat_col:
+                df = compute_hfias_scores(
+                    df,
+                    question_cols=None,
+                    score_col="hfias_score",
+                    category_col="hfias_category",
                 )
-                st.plotly_chart(fig_pie, use_container_width=True)
-            else:
-                st.info("Selected categorical variable has only missing values.")
-        else:
-            st.info("No categorical variables available for plotting.")
+                cat_col = "hfias_category"
 
-        # --- Map (if lat/lon exist) ---
-        st.markdown("### GPS / Country Map (if latitude & longitude available)")
-
-        lat_cols = [c for c in final_df.columns if "lat" in c.lower()]
-        lon_cols = [c for c in final_df.columns if "lon" in c.lower() or "lng" in c.lower()]
-        country_candidates = [
-            c for c in final_df.columns
-            if any(k in c.lower() for k in ["country", "nation", "iso3", "iso2"])
-        ]
-
-        if lat_cols and lon_cols:
-            st.info(
-                "A GPS map is available because latitude/longitude columns were detected. "
-                "To colour the map (e.g., food security from red=poor to green=good), "
-                "select an indicator below."
-            )
-
-            lat_col = lat_cols[0]
-            lon_col = lon_cols[0]
-
-            country_col = st.selectbox(
-                "Country column (optional, for hover labels)",
-                ["(none)"] + country_candidates,
-                index=1 if country_candidates else 0,
-            )
-
-            # Try to guess a food-security style variable
-            fs_suggestions = [
-                c for c in final_df.columns
-                if any(
-                    k in c.lower()
-                    for k in ["food", "hfias", "fcs", "hfi", "diet", "dds", "foodsec"]
-                )
-            ]
-            color_options = ["(none)"] + list(final_df.columns)
-            default_index = 0
-            if fs_suggestions and fs_suggestions[0] in color_options:
-                default_index = color_options.index(fs_suggestions[0])
-
-            color_col = st.selectbox(
-                "Indicator for colour shading (e.g., food security index/category)",
-                color_options,
-                index=default_index,
-            )
-
-            create_map = st.checkbox(
-                "Create GPS-based country map with colour categories (red=poor, green=good)",
-                value=True,
-            )
-
-            if create_map:
-                cols_to_use = [lat_col, lon_col]
-                rename_map = {lat_col: "lat", lon_col: "lon"}
-
-                if country_col != "(none)":
-                    cols_to_use.append(country_col)
-                if color_col != "(none)":
-                    cols_to_use.append(color_col)
-
-                map_df = final_df[cols_to_use].dropna(subset=[lat_col, lon_col]).copy()
-                map_df = map_df.rename(columns=rename_map)
-
-                if map_df.empty:
-                    st.info("Latitude/longitude columns detected but all rows are missing.")
-                else:
-                    if color_col != "(none)":
-                        # Continuous vs categorical colour
-                        if pd.api.types.is_numeric_dtype(final_df[color_col]):
-                            fig = px.scatter_geo(
-                                map_df,
-                                lat="lat",
-                                lon="lon",
-                                color=color_col,
-                                hover_name=country_col if country_col != "(none)" else None,
-                                color_continuous_scale="RdYlGn",
-                                title="GPS points coloured by selected indicator (green = better)",
-                            )
-                        else:
-                            fig = px.scatter_geo(
-                                map_df,
-                                lat="lat",
-                                lon="lon",
-                                color=color_col,
-                                hover_name=country_col if country_col != "(none)" else None,
-                                title="GPS points coloured by selected indicator",
-                            )
-                        st.plotly_chart(fig, use_container_width=True)
-                    else:
-                        # Simple map with no colour
-                        st.map(
-                            map_df[["lat", "lon"]],
-                            zoom=None,
-                            use_container_width=True,
-                        )
-        else:
-            st.caption("No latitude/longitude columns detected for mapping. "
-                       "To enable maps, add `latitude`/`longitude` columns to your dataset.")
-
-    # ===== Page 3: Slicer / Cross-tabs =====
-    elif page == "Slicer / Cross-tabs":
-        st.subheader("🧩 Slicer / Cross-tab Dashboards")
-
-        if not numeric_cols_all or not cat_cols_all:
-            st.info("Need at least one numeric and one categorical variable for slicer analysis.")
-        else:
-            target = st.selectbox(
-                "Select numeric outcome (e.g., income or food security score)",
-                numeric_cols_all,
-                key="slicer_target",
-            )
-            slicer_1 = st.selectbox(
-                "First slicer (categorical, e.g., gender or region)",
-                cat_cols_all,
-                key="slicer1",
-            )
-            slicer_2 = st.selectbox(
-                "Optional second slicer (e.g., region)",
-                ["(none)"] + cat_cols_all,
-                key="slicer2",
-            )
-
-            st.markdown(
-                "This will show **mean and count** of the outcome by slicer(s) "
-                "(e.g., *income by gender*, *food security by region*)."
-            )
-
-            group_cols = [slicer_1] if slicer_2 == "(none)" else [slicer_1, slicer_2]
-            grouped = (
-                final_df[group_cols + [target]]
-                .dropna(subset=[target])
-                .groupby(group_cols)[target]
-                .agg(["count", "mean"])
+            total_n = len(df)
+            hfias_summary = (
+                df.groupby(cat_col)["hfias_score"]
+                .agg(count="size", mean="mean")
                 .reset_index()
             )
-            grouped.rename(columns={"count": "n", "mean": f"{target}_mean"}, inplace=True)
+            hfias_summary["percent"] = (hfias_summary["count"] / total_n * 100).round(1)
+            hfias_summary["mean"] = hfias_summary["mean"].round(2)
+            st.dataframe(hfias_summary)
 
-            st.markdown("**Grouped summary table**")
+            fig_hfias = px.bar(
+                hfias_summary,
+                x=cat_col,
+                y="count",
+                color=cat_col,
+                title="HFIAS severity distribution (hover for % & mean)",
+                hover_data={"percent": True, "mean": True},
+                labels={cat_col: "HFIAS category", "count": "Households"},
+            )
+            fig_hfias.update_layout(
+                legend_title_text="HFIAS category",
+                bargap=0.25,
+            )
+            st.plotly_chart(fig_hfias, use_container_width=True)
+
+            narrative_chunks.append(
+                "HFIAS distribution (count, mean score, and % of total by category):\n"
+                + hfias_summary.to_string(index=False)
+            )
+
+        # ------------------ HDDS / WDDS ------------------
+        for col in ["hdds", "wdds"]:
+            if col in df.columns:
+                st.markdown(f"##### {col.upper()} distribution")
+                st.write(df[col].describe())
+
+                fig_dds = px.histogram(
+                    df,
+                    x=col,
+                    nbins=10,
+                    title=f"Distribution of {col.upper()} (hover for counts)",
+                    labels={col: col.upper(), "count": "Frequency"},
+                )
+                st.plotly_chart(fig_dds, use_container_width=True)
+
+                narrative_chunks.append(
+                    f"{col.upper()} distribution summary:\n"
+                    + df[col].describe().to_string()
+                )
+
+        # ------------------ CHILD ANTHROPOMETRY ------------------
+        if "wfh_zscore" in df.columns:
+            st.markdown("##### Child weight-for-height z-scores & malnutrition")
+
+            st.write(df["wfh_zscore"].describe())
+
+            fig_z = px.histogram(
+                df,
+                x="wfh_zscore",
+                nbins=12,
+                title="Distribution of WFH Z-scores",
+                labels={"wfh_zscore": "WFH Z-score", "count": "Children"},
+            )
+            st.plotly_chart(fig_z, use_container_width=True)
+
+            narrative_chunks.append(
+                "WFH z-score distribution:\n"
+                + df["wfh_zscore"].describe().to_string()
+            )
+
+            if "malnutrition_type" in df.columns:
+                st.write("Malnutrition categories:")
+                mal_counts = df["malnutrition_type"].value_counts(dropna=False)
+                mal_tbl = pd.DataFrame(
+                    {
+                        "malnutrition_type": mal_counts.index.astype(str),
+                        "count": mal_counts.values,
+                    }
+                )
+                mal_tbl["percent"] = (
+                    mal_tbl["count"] / mal_tbl["count"].sum() * 100
+                ).round(1)
+                st.dataframe(mal_tbl)
+
+                fig_mal = px.bar(
+                    mal_tbl,
+                    x="malnutrition_type",
+                    y="count",
+                    color="malnutrition_type",
+                    title="Malnutrition type (hover for %)",
+                    hover_data={"percent": True},
+                    labels={"malnutrition_type": "Type", "count": "Children"},
+                )
+                st.plotly_chart(fig_mal, use_container_width=True)
+
+                narrative_chunks.append(
+                    "Malnutrition type frequencies (count and %):\n"
+                    + mal_tbl.to_string(index=False)
+                )
+
+        # ------------------ YOUTH DEVELOPMENT & EMPOWERMENT ------------------
+        st.markdown("##### Youth development & empowerment indicators")
+
+        youth_num_keywords = [
+            "decision",
+            "power",
+            "agency",
+            "aspiration",
+            "hope",
+            "future",
+            "financial",
+            "finance",
+            "literacy",
+            "saving",
+            "savings",
+            "budget",
+            "empathy",
+            "empath",
+            "participation",
+            "voice",
+            "leadership",
+        ]
+        youth_cat_keywords = [
+            "youth",
+            "training",
+            "program",
+            "cohort",
+            "group",
+            "employment",
+            "employed",
+            "self_emp",
+            "business",
+            "mentor",
+            "club",
+            "volunteer",
+        ]
+
+        youth_numeric_cols = [
+            c
+            for c in numeric_cols
+            if any(k in c.lower() for k in youth_num_keywords)
+        ]
+        youth_categorical_cols = [
+            c
+            for c in categorical_cols
+            if any(k in c.lower() for k in youth_num_keywords + youth_cat_keywords)
+        ]
+
+        if youth_numeric_cols or youth_categorical_cols:
+            st.success(
+                f"Detected youth-relevant variables: "
+                f"{len(youth_numeric_cols)} numeric, {len(youth_categorical_cols)} categorical."
+            )
+
+            # ----- Numeric youth indicators -----
+            if youth_numeric_cols:
+                st.markdown(
+                    "###### Youth numeric indicators (decision power, hope, financial literacy, empathy, etc.)"
+                )
+                youth_desc = df[youth_numeric_cols].describe().T
+                st.dataframe(youth_desc)
+                narrative_chunks.append(
+                    "Youth numeric indicators (decision/hope/financial/empathy) descriptives:\n"
+                    + youth_desc.to_string()
+                )
+
+                # Histograms for up to 8 youth numeric vars
+                for col in youth_numeric_cols[:8]:
+                    fig_youth = px.histogram(
+                        df,
+                        x=col,
+                        nbins=10,
+                        title=f"Distribution of {col}",
+                        labels={col: col, "count": "Frequency"},
+                    )
+                    st.plotly_chart(fig_youth, use_container_width=True)
+
+            # ----- Youth indicators by sex -----
+            if youth_numeric_cols and "sex" in df.columns:
+                st.markdown("###### Youth indicators by sex")
+                for col in youth_numeric_cols:
+                    grouped = df.groupby("sex")[col].mean().reset_index()
+                    st.write(f"Mean {col} by sex:")
+                    st.dataframe(grouped)
+
+                    fig_sex = px.bar(
+                        grouped,
+                        x="sex",
+                        y=col,
+                        title=f"Mean {col} by sex",
+                        labels={"sex": "Sex", col: col},
+                    )
+                    st.plotly_chart(fig_sex, use_container_width=True)
+
+                    narrative_chunks.append(
+                        f"Mean {col} by sex:\n{grouped.to_string(index=False)}"
+                    )
+
+            # ----- Youth indicators by region -----
+            if youth_numeric_cols and "region" in df.columns:
+                st.markdown("###### Youth indicators by region")
+                for col in youth_numeric_cols:
+                    grouped_r = df.groupby("region")[col].mean().reset_index()
+                    st.write(f"Mean {col} by region:")
+                    st.dataframe(grouped_r)
+
+                    fig_reg = px.bar(
+                        grouped_r,
+                        x="region",
+                        y=col,
+                        title=f"Mean {col} by region",
+                        labels={"region": "Region", col: col},
+                    )
+                    st.plotly_chart(fig_reg, use_container_width=True)
+
+                    narrative_chunks.append(
+                        f"Mean {col} by region:\n{grouped_r.to_string(index=False)}"
+                    )
+
+            # ----- Categorical youth variables -----
+            if youth_categorical_cols:
+                st.markdown(
+                    "###### Youth categorical variables (programs, groups, status, etc.)"
+                )
+                total_n = len(df)
+                for col in youth_categorical_cols:
+                    vc = df[col].value_counts(dropna=False)
+                    freq_tbl = pd.DataFrame(
+                        {
+                            col: vc.index.astype(str),
+                            "count": vc.values,
+                        }
+                    )
+                    freq_tbl["percent"] = (
+                        freq_tbl["count"] / total_n * 100
+                    ).round(1)
+                    st.write(f"**{col}** (count and % of total):")
+                    st.dataframe(freq_tbl)
+
+                    fig_cat = px.bar(
+                        freq_tbl,
+                        x=col,
+                        y="count",
+                        title=f"{col} (bar chart, hover for %)",
+                        hover_data={"percent": True},
+                    )
+                    st.plotly_chart(fig_cat, use_container_width=True)
+
+                    if vc.shape[0] <= 10:
+                        fig_pie = px.pie(
+                            freq_tbl,
+                            names=col,
+                            values="count",
+                            title=f"{col} (pie chart)",
+                            hover_data={"percent": True},
+                        )
+                        st.plotly_chart(fig_pie, use_container_width=True)
+
+                    narrative_chunks.append(
+                        f"Youth categorical {col} (count and %):\n"
+                        + freq_tbl.to_string(index=False)
+                    )
+        else:
+            st.info(
+                "No youth-specific variables detected by name. "
+                "You can still use the general descriptive and crosstab options in the Descriptives tab."
+            )
+
+# ==================================================
+# TAB: DESCRIPTIVES & CROSSTABS
+# ==================================================
+with tab_desc:
+    st.markdown(
+        '<div class="section-title" title="Flexible descriptive statistics, group means and crosstabs.">'
+        "DESCRIPTIVE ANALYSIS & CROSSTABS"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    left_col, right_col = st.columns([2, 1])
+
+    # ----- Numeric by group -----
+    if selected_numeric_by_group and selected_group_vars:
+        with left_col:
+            st.markdown("#### Numeric variables by selected categories")
+            total_n = len(df)
+            group_counts = (
+                df.groupby(selected_group_vars)
+                .size()
+                .rename("group_count")
+            )
+            group_perc = (group_counts / total_n * 100).rename("group_percent")
+
+            grouped_stats = df.groupby(selected_group_vars)[
+                selected_numeric_by_group
+            ].agg(["mean", "std", "count", "min", "max"])
+
+            grouped = pd.concat([grouped_stats, group_counts, group_perc], axis=1)
+
+            new_cols = []
+            for col in grouped.columns:
+                if isinstance(col, tuple):
+                    new_cols.append(
+                        "_".join([str(c) for c in col if c != ""]).strip("_")
+                    )
+                else:
+                    new_cols.append(str(col))
+            grouped.columns = new_cols
+
             st.dataframe(grouped)
 
-            st.markdown("**Visualization of mean by slicer(s) (vertical bars)**")
+            narrative_chunks.append(
+                f"Numeric descriptives by {selected_group_vars} for {selected_numeric_by_group} "
+                f"(including group_count and group_percent):\n{grouped.to_string()}"
+            )
 
-            if slicer_2 == "(none)":
-                # One slicer → simple vertical bar chart
-                fig_mean = px.bar(
-                    grouped,
-                    x=slicer_1,
-                    y=f"{target}_mean",
-                    title=f"Mean {target} by {slicer_1}",
-                    labels={
-                        slicer_1: slicer_1,
-                        f"{target}_mean": f"Mean {target}",
-                    },
+        primary_group = selected_group_vars[0]
+        with right_col:
+            st.markdown(f"#### Mean by {primary_group}")
+            for num_var in selected_numeric_by_group:
+                mean_df = (
+                    df.groupby(primary_group)[num_var]
+                    .mean()
+                    .reset_index()
+                    .rename(columns={num_var: "mean_value"})
                 )
-                st.plotly_chart(fig_mean, use_container_width=True)
-            else:
-                # Two slicers → grouped vertical bar chart
                 fig_mean = px.bar(
-                    grouped,
-                    x=slicer_1,
-                    y=f"{target}_mean",
-                    color=slicer_2,
-                    barmode="group",
-                    title=f"Mean {target} by {slicer_1} and {slicer_2}",
-                    labels={
-                        slicer_1: slicer_1,
-                        slicer_2: slicer_2,
-                        f"{target}_mean": f"Mean {target}",
-                    },
+                    mean_df,
+                    x=primary_group,
+                    y="mean_value",
+                    title=f"Mean {num_var} by {primary_group}",
+                    labels={primary_group: primary_group, "mean_value": num_var},
                 )
                 st.plotly_chart(fig_mean, use_container_width=True)
 
-    # ===== Page 4: Narrative summary =====
-    elif page == "Narrative summary":
-        st.subheader("📝 Narrative summary of dataset")
-        narrative = generate_narrative_from_eda(final_df, title="full dataset")
-        st.markdown(narrative)
+    # ----- Categorical frequency plots (bar / pie) -----
+    if selected_cats_for_freq:
+        with left_col:
+            st.markdown("#### Frequency tables for selected categoricals")
+            total_n = len(df)
+            for cat in selected_cats_for_freq:
+                vc = df[cat].value_counts(dropna=False)
+                freq_tbl = pd.DataFrame(
+                    {
+                        cat: vc.index.astype(str),
+                        "count": vc.values,
+                    }
+                )
+                freq_tbl["percent"] = (
+                    freq_tbl["count"] / total_n * 100
+                ).round(1)
+                st.write(f"**{cat}**")
+                st.dataframe(freq_tbl)
+                narrative_chunks.append(
+                    f"Frequencies for {cat} (count and % of total):\n"
+                    + freq_tbl.to_string(index=False)
+                )
 
-st.markdown("---")
-st.caption(
-    "Automatic cleaning is applied by default, but you remain in control. "
-    "Missing/NA placeholders are cleaned, and NaN values are ignored in graphs and summaries. "
-    "Use the EDA, Visualizations, Slicer, and GPS maps to explore feasibility, "
-    "food security gradients (red → green), and risk patterns across regions and countries."
-)
+        with right_col:
+            st.markdown("#### Categorical plots")
+            for cat in selected_cats_for_freq:
+                vc = df[cat].value_counts(dropna=False)
+                freq_tbl = pd.DataFrame(
+                    {
+                        cat: vc.index.astype(str),
+                        "count": vc.values,
+                    }
+                )
 
+                fig_cat = px.bar(
+                    freq_tbl,
+                    x=cat,
+                    y="count",
+                    title=f"{cat} (bar chart)",
+                )
+                st.plotly_chart(fig_cat, use_container_width=True)
+
+                if vc.shape[0] <= 10:
+                    fig_cat_pie = px.pie(
+                        freq_tbl,
+                        names=cat,
+                        values="count",
+                        title=f"{cat} (pie chart)",
+                    )
+                    st.plotly_chart(fig_cat_pie, use_container_width=True)
+
+    # ----- Crosstab between two categorical variables -----
+    if (
+        crosstab_var1 != "(none)"
+        and crosstab_var2 != "(none)"
+        and crosstab_var1 != crosstab_var2
+    ):
+        st.markdown("#### Crosstab between two categorical variables")
+        with left_col:
+            xtab = pd.crosstab(
+                df[crosstab_var1], df[crosstab_var2], dropna=False
+            )
+            st.write(f"**Crosstab: {crosstab_var1} × {crosstab_var2} (counts)**")
+            st.dataframe(xtab)
+            narrative_chunks.append(
+                f"Crosstab counts for {crosstab_var1} x {crosstab_var2}:\n"
+                + xtab.to_string()
+            )
+
+            xtab_pct = xtab.div(xtab.sum(axis=1), axis=0) * 100
+            st.write(f"**Crosstab: {crosstab_var1} × {crosstab_var2} (row %)**")
+            st.dataframe(xtab_pct.round(1))
+
+        with right_col:
+            xtab_pct_reset = xtab_pct.reset_index().melt(
+                id_vars=crosstab_var1,
+                var_name=crosstab_var2,
+                value_name="row_percent",
+            )
+            fig_xtab = px.bar(
+                xtab_pct_reset,
+                x=crosstab_var1,
+                y="row_percent",
+                color=crosstab_var2,
+                title=f"{crosstab_var1} × {crosstab_var2} (row % stacked)",
+                labels={crosstab_var1: crosstab_var1, "row_percent": "Percentage"},
+            )
+            st.plotly_chart(fig_xtab, use_container_width=True)
+
+    # ----- GENERAL DESCRIPTIVES -----
+    st.markdown("#### General descriptive statistics")
+    if numeric_cols:
+        desc = df[numeric_cols].describe().T
+        st.dataframe(desc)
+        narrative_chunks.append("Overall numeric descriptives:\n" + desc.to_string())
+    if categorical_cols:
+        st.markdown("#### Key categorical distributions (top 10)")
+        total_n = len(df)
+        for col in categorical_cols[:10]:
+            st.write(f"**{col}** value counts and % of total:")
+            vc = df[col].value_counts(dropna=False)
+            freq_tbl = pd.DataFrame(
+                {
+                    col: vc.index.astype(str),
+                    "count": vc.values,
+                }
+            )
+            freq_tbl["percent"] = (
+                freq_tbl["count"] / total_n * 100
+            ).round(1)
+            st.dataframe(freq_tbl)
+            narrative_chunks.append(
+                f"Value counts for {col} (count and %):\n"
+                + freq_tbl.to_string(index=False)
+            )
+
+# ==================================================
+# TAB: AI NARRATIVE & DOWNLOADS
+# ==================================================
+with tab_ai:
+    st.markdown(
+        '<div class="section-title" title="Generate human-readable narrative and export data/plots.">'
+        "AI NARRATIVE REPORT & EXPORTS"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    # ---------------- AI NARRATIVE ----------------
+    st.markdown("##### AI Narrative Report")
+
+    if not openai.api_key:
+        st.warning(
+            "OpenAI API key not set in Streamlit secrets. Narrative report is not available."
+        )
+    else:
+        user_prompt = st.text_area(
+            "Optional: refine what you want the AI to focus on",
+            value=(
+                "Summarize the dataset, describe key findings on food security, "
+                "dietary diversity, youth decision-making and agency, hope for the future, "
+                "financial literacy, empathy, and income/consumption where applicable. "
+                "Highlight any gender or regional differences and potential program implications."
+            ),
+        )
+
+        if st.button("Generate AI Narrative"):
+            context_sample = df.head(10).to_dict()
+            combined_narrative = (
+                "\n\n".join(narrative_chunks) if narrative_chunks else "No prior summaries."
+            )
+
+            prompt = (
+                "You are an expert data analyst working on food security, nutrition, and youth development.\n"
+                "Write a clear, non-technical narrative (1–2 pages) summarizing the key insights "
+                "from the analysis below, and suggest 3–5 program or policy implications.\n\n"
+                f"USER FOCUS: {user_prompt}\n\n"
+                "ANALYSIS SUMMARIES:\n"
+                f"{combined_narrative}\n\n"
+                "DATA PREVIEW (first 10 rows as dict):\n"
+                f"{context_sample}\n"
+            )
+
+            try:
+                completion = openai.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.2,
+                )
+                ai_text = completion.choices[0].message.content
+                st.markdown(ai_text)
+            except Exception as e:
+                st.error(f"OpenAI API error: {e}")
+
+    st.markdown("---")
+    st.markdown("##### Downloads")
+
+    csv_bytes = df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "⬇️ Download current dataset as CSV",
+        data=csv_bytes,
+        file_name="dataset_processed.csv",
+        mime="text/csv",
+    )
+
+    pdf_buffer = io.BytesIO()
+    with PdfPages(pdf_buffer) as pdf:
+        for col in numeric_cols[:12]:
+            fig, ax = plt.subplots()
+            ax.hist(df[col].dropna(), bins=12)
+            ax.set_title(f"Distribution of {col}")
+            ax.set_xlabel(col)
+            ax.set_ylabel("Frequency")
+            pdf.savefig(fig)
+            plt.close(fig)
+    pdf_buffer.seek(0)
+
+    st.download_button(
+        "⬇️ Download basic PDF chart report",
+        data=pdf_buffer,
+        file_name="basic_report.pdf",
+        mime="application/pdf",
+    )
