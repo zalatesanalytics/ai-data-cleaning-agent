@@ -378,14 +378,14 @@ def auto_fix_age_education_inconsistencies(df: pd.DataFrame) -> pd.DataFrame:
     edu_series = df[edu_col].astype(str)
     band_mask = (age_series >= 5) & (age_series < 18)
     higher_terms = [
-        "university",
-        "college",
-        "bachelor",
-        "master",
-        "phd",
-        "higher",
-        "diploma",
-        "degree",
+            "university",
+            "college",
+            "bachelor",
+            "master",
+            "phd",
+            "higher",
+            "diploma",
+            "degree",
     ]
     higher_mask = edu_series.str.lower().str.contains("|".join(higher_terms), na=False)
 
@@ -740,123 +740,64 @@ st.markdown(
         margin-bottom: 2rem;
     }
 
-    /* --------------------------
-       SIDEBAR CONTAINER
-    ---------------------------*/
-       /* ------------------------------
-   FULL DARK SIDEBAR (no white)
-------------------------------*/
-[data-testid="stSidebar"] {
-    background-color: #0b1220 !important;
-    padding: 1.2rem 1rem !important;
-}
+    /* ------------------------------
+       FULL DARK SIDEBAR (no white)
+    ------------------------------*/
+    [data-testid="stSidebar"] {
+        background-color: #0b1220 !important;
+        padding: 1.2rem 1rem !important;
+    }
 
-/* Remove all white/gray from inner elements */
-[data-testid="stSidebar"] * {
-    background-color: transparent !important;
-    color: #e8ecf1 !important;
-}
-
-/* Sidebar text */
-[data-testid="stSidebar"] h2,
-[data-testid="stSidebar"] h3,
-[data-testid="stSidebar"] label,
-[data-testid="stSidebar"] p {
-    color: #ffffff !important;
-    background-color: transparent !important;
-}
-
-/* Inputs (dropdowns, text inputs, radios, checkboxes) */
-[data-testid="stSidebar"] .st-bb,
-[data-testid="stSidebar"] .st-af,
-[data-testid="stSidebar"] .st-bg,
-[data-testid="stSidebar"] .st-c8,
-[data-testid="stSidebar"] .st-ci,
-[data-testid="stSidebar"] input,
-[data-testid="stSidebar"] select,
-[data-testid="stSidebar"] textarea {
-    background-color: #1c2537 !important;
-    border: 1px solid #2d3a50 !important;
-    color: #e8ecf1 !important;
-    border-radius: 8px !important;
-}
-
-/* File upload area */
-[data-testid="stFileUploadDropzone"] {
-    background-color: #1c2537 !important;
-    border: 2px dashed #334155 !important;
-}
-[data-testid="stFileUploadDropzone"] * {
-    background-color: transparent !important;
-    color: #dfe6ee !important;
-}
-
-/* Radio buttons */
-.stRadio > div > label > div:first-child {
-    background-color: #1c2537 !important;
-    border: 2px solid #94a3b8 !important;
-}
-.stRadio > div > label > div:first-child div {
-    background-color: #38bdf8 !important;
-}
-
-/* Checkbox styling */
-.stCheckbox > div > label > div:first-child {
-    background-color: #1c2537 !important;
-    border: 2px solid #94a3b8 !important;
-}
-.stCheckbox > div > label > div:first-child svg {
-    stroke: #38bdf8 !important;
-}
- 
-    /* Sidebar text */
+    /* Remove all white/gray from inner elements */
     [data-testid="stSidebar"] * {
-        color: #f5f7fa !important;
-    }
-    /* Sidebar headers & labels */
-    [data-testid="stSidebar"] h2,
-    [data-testid="stSidebar"] h3,
-    [data-testid="stSidebar"] label {
-        color: #ffffff !important;
-        font-weight: 600 !important;
-        font-size: 15px;
-    }
-
-    /* --------------------------
-       SIDEBAR INPUT ELEMENTS
-    ---------------------------*/
-    /* General input backgrounds (selects, text, etc.) */
-    [data-testid="stSidebar"] .st-bb,
-    [data-testid="stSidebar"] .st-af,
-    [data-testid="stSidebar"] .st-bg,
-    [data-testid="stFileUploadDropzone"] {
-        background-color: #1c2537 !important;
-        border-radius: 8px !important;
-        border: 1px solid #2d3a50 !important;
+        background-color: transparent !important;
         color: #e8ecf1 !important;
     }
 
-    /* File uploader text */
-    [data-testid="stFileUploadDropzone"] * {
-        color: #dfe6ee !important;
-        font-size: 13px;
-    }
-
-    /* Radio & checkbox labels */
-    .stRadio label, .stCheckbox label {
+    /* Sidebar text */
+    [data-testid="stSidebar"] h2,
+    [data-testid="stSidebar"] h3,
+    [data-testid="stSidebar"] label,
+    [data-testid="stSidebar"] p {
         color: #ffffff !important;
-        font-size: 15px;
+        background-color: transparent !important;
     }
 
-    /* Radio marker */
+    /* Inputs (dropdowns, text inputs, radios, checkboxes) */
+    [data-testid="stSidebar"] .st-bb,
+    [data-testid="stSidebar"] .st-af,
+    [data-testid="stSidebar"] .st-bg,
+    [data-testid="stSidebar"] .st-c8,
+    [data-testid="stSidebar"] .st-ci,
+    [data-testid="stSidebar"] input,
+    [data-testid="stSidebar"] select,
+    [data-testid="stSidebar"] textarea {
+        background-color: #1c2537 !important;
+        border: 1px solid #2d3a50 !important;
+        color: #e8ecf1 !important;
+        border-radius: 8px !important;
+    }
+
+    /* File upload area */
+    [data-testid="stFileUploadDropzone"] {
+        background-color: #1c2537 !important;
+        border: 2px dashed #334155 !important;
+    }
+    [data-testid="stFileUploadDropzone"] * {
+        background-color: transparent !important;
+        color: #dfe6ee !important;
+    }
+
+    /* Radio buttons */
     .stRadio > div > label > div:first-child {
+        background-color: #1c2537 !important;
         border: 2px solid #94a3b8 !important;
     }
     .stRadio > div > label > div:first-child div {
-        background-color: #38bdf8 !important; /* cyan selection */
+        background-color: #38bdf8 !important;
     }
 
-    /* Checkbox marker */
+    /* Checkbox styling */
     .stCheckbox > div > label > div:first-child {
         background-color: #1c2537 !important;
         border: 2px solid #94a3b8 !important;
@@ -1199,7 +1140,6 @@ else:
             st.markdown("**Categorical variables – top categories**")
             for col in cat_cols_all[:10]:
                 with st.expander(f"Variable: {col}", expanded=False):
-                    # dropna=True so NaN/None are ignored in the summary
                     st.write(final_df[col].value_counts(dropna=True).head(15))
         else:
             st.info("No categorical variables detected.")
@@ -1223,7 +1163,7 @@ else:
                 numeric_cols_all,
                 key="viz_num",
             )
-            numeric_series = final_df[num_var].dropna()  # ignore missing values
+            numeric_series = final_df[num_var].dropna()
 
             if not numeric_series.empty:
                 col_hist, col_line = st.columns(2)
@@ -1262,7 +1202,7 @@ else:
             )
             cat_counts = (
                 final_df[cat_var]
-                .value_counts(dropna=True)  # ignore missing categories
+                .value_counts(dropna=True)
                 .head(15)
             )
 
@@ -1435,7 +1375,7 @@ else:
             group_cols = [slicer_1] if slicer_2 == "(none)" else [slicer_1, slicer_2]
             grouped = (
                 final_df[group_cols + [target]]
-                .dropna(subset=[target])  # ignore missing outcome values
+                .dropna(subset=[target])
                 .groupby(group_cols)[target]
                 .agg(["count", "mean"])
                 .reset_index()
@@ -1445,39 +1385,37 @@ else:
             st.markdown("**Grouped summary table**")
             st.dataframe(grouped)
 
-st.markdown("**Visualization of mean by slicer(s) (vertical bars)**")
+            st.markdown("**Visualization of mean by slicer(s) (vertical bars)**")
 
-if slicer_2 == "(none)":
-    # One slicer → simple vertical bar chart
-    fig_mean = px.bar(
-        grouped,
-        x=slicer_1,
-        y=f"{target}_mean",
-        title=f"Mean {target} by {slicer_1}",
-        labels={
-            slicer_1: slicer_1,
-            f"{target}_mean": f"Mean {target}",
-        },
-    )
-    st.plotly_chart(fig_mean, use_container_width=True)
-
-else:
-    # Two slicers → grouped vertical bar chart
-    fig_mean = px.bar(
-        grouped,
-        x=slicer_1,
-        y=f"{target}_mean",
-        color=slicer_2,
-        barmode="group",
-        title=f"Mean {target} by {slicer_1} and {slicer_2}",
-        labels={
-            slicer_1: slicer_1,
-            slicer_2: slicer_2,
-            f"{target}_mean": f"Mean {target}",
-        },
-    )
-    st.plotly_chart(fig_mean, use_container_width=True)
-
+            if slicer_2 == "(none)":
+                # One slicer → simple vertical bar chart
+                fig_mean = px.bar(
+                    grouped,
+                    x=slicer_1,
+                    y=f"{target}_mean",
+                    title=f"Mean {target} by {slicer_1}",
+                    labels={
+                        slicer_1: slicer_1,
+                        f"{target}_mean": f"Mean {target}",
+                    },
+                )
+                st.plotly_chart(fig_mean, use_container_width=True)
+            else:
+                # Two slicers → grouped vertical bar chart
+                fig_mean = px.bar(
+                    grouped,
+                    x=slicer_1,
+                    y=f"{target}_mean",
+                    color=slicer_2,
+                    barmode="group",
+                    title=f"Mean {target} by {slicer_1} and {slicer_2}",
+                    labels={
+                        slicer_1: slicer_1,
+                        slicer_2: slicer_2,
+                        f"{target}_mean": f"Mean {target}",
+                    },
+                )
+                st.plotly_chart(fig_mean, use_container_width=True)
 
     # ===== Page 4: Narrative summary =====
     elif page == "Narrative summary":
