@@ -1,6 +1,6 @@
 """
 Zalates Analytics – AI Data Cleaning & Integration Agent
-(Futuristic theme + GPS country maps + separate pages for EDA, Visualizations, and Slicer dashboards)
+(Futuristic but readable theme + GPS maps + separate pages for EDA, Visualizations, and Slicers)
 """
 
 import os
@@ -192,7 +192,7 @@ def suggest_similar_columns(dfs: Dict[str, pd.DataFrame]) -> List[Tuple[str, str
 # 4. Data cleaning utilities
 # =========================================
 
-PLACEHOLDER_VALUES = {"?", "NA", "N/A", "999", "9999", "Unknown", "unknown"}
+PLACEHOLDER_VALUES = {"?", "NA", "N/A", "na", "NaN", "nan", "999", "9999", "Unknown", "unknown"}
 
 
 def basic_cleaning(df: pd.DataFrame) -> pd.DataFrame:
@@ -507,6 +507,20 @@ def auto_impute_categorical_missing(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def final_post_clean(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Final pass:
+    - Replace common placeholder strings with NaN.
+    - Drop rows that are completely empty.
+    """
+    df = df.copy()
+    for col in df.columns:
+        if df[col].dtype == "object":
+            df[col] = df[col].replace(list(PLACEHOLDER_VALUES), np.nan)
+    df = df.dropna(how="all")
+    return df
+
+
 # =========================================
 # 5. Anomaly detection (optional ML)
 # =========================================
@@ -701,34 +715,42 @@ st.set_page_config(
     layout="wide",
 )
 
-# Futuristic but readable theme
+# Futuristic but readable theme – higher contrast, bigger base font
 st.markdown(
     """
     <style>
+    html, body, [class*="css"]  {
+        font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, "Roboto", sans-serif;
+        font-size: 16px;
+    }
+    h1, h2, h3 {
+        font-weight: 600;
+    }
     .stApp {
-        background: radial-gradient(circle at 0% 0%, #0b132b 0%, #151a3c 35%, #04151f 100%);
+        background: radial-gradient(circle at 0% 0%, #0f172a 0%, #111827 40%, #020617 100%);
     }
     .block-container {
         padding-top: 1rem;
         padding-bottom: 2rem;
-        background-color: #ffffff;
+        background-color: #f9fafb;
         color: #111827;
         border-radius: 18px;
-        box-shadow: 0 18px 40px rgba(0, 0, 0, 0.28);
+        box-shadow: 0 18px 40px rgba(15, 23, 42, 0.55);
         margin-top: 1rem;
         margin-bottom: 2rem;
     }
     [data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #050816 0%, #151a3c 40%, #0f766e 100%);
+        background: linear-gradient(180deg, #020617 0%, #111827 40%, #0f766e 100%);
         color: #e5e7eb;
     }
     [data-testid="stSidebar"] * {
         color: #e5e7eb !important;
+        font-size: 15px;
     }
     .zalates-header {
         padding: 1.2rem 1.4rem;
         border-radius: 1rem;
-        background: linear-gradient(135deg, #1c1f4a 0%, #5e2b83 45%, #09a4b4 100%);
+        background: linear-gradient(135deg, #1d4ed8 0%, #7c3aed 45%, #06b6d4 100%);
         color: #ffffff;
         margin-bottom: 1rem;
     }
@@ -747,7 +769,7 @@ with col_title:
     st.markdown(
         '<div class="zalates-header">'
         '<h2>🧹 Zalates Analytics – AI Data-Cleaning, Integration & Risk Dashboards</h2>'
-        '<p style="margin-bottom:0;">Clean, harmonize, and analyze data for bank feasibility, food security, and business risk decisions.</p>'
+        '<p style="margin-bottom:0;">Clean, harmonize, and analyze data for feasibility, food security, and business risk decisions.</p>'
         '</div>',
         unsafe_allow_html=True,
     )
@@ -765,7 +787,7 @@ uploaded_files = st.sidebar.file_uploader(
 
 st.sidebar.caption(
     "Tip: For GPS maps, include `latitude` / `longitude` (or `lat` / `lon`) and a "
-    "food security indicator (e.g., `hfias`, `fcs`, `food_security_cat`)."
+    "food security indicator (e.g., `hfias`, `fcs`, `dds`, `food_security_cat`)."
 )
 
 # Collect raw dfs
@@ -905,6 +927,7 @@ if integrate_and_clean:
     df_clean = auto_impute_categorical_missing(df_clean)
     df_clean = auto_fix_age_education_inconsistencies(df_clean)
     df_clean = auto_fix_employment_income_inconsistencies(df_clean)
+    df_clean = final_post_clean(df_clean)  # remove placeholder NA/nan & empty rows
 
     st.session_state["cleaned_df_auto"] = df_clean
 
@@ -1038,7 +1061,8 @@ else:
             st.markdown("**Categorical variables – top categories**")
             for col in cat_cols_all[:10]:
                 with st.expander(f"Variable: {col}", expanded=False):
-                    st.write(final_df[col].value_counts(dropna=False).head(15))
+                    # dropna=True so NaN/None are ignored in the summary
+                    st.write(final_df[col].value_counts(dropna=True).head(15))
         else:
             st.info("No categorical variables detected.")
 
@@ -1063,7 +1087,7 @@ else:
             )
             st.bar_chart(
                 final_df[num_for_hist]
-                .dropna()
+                .dropna()  # ignore missing values
                 .value_counts()
                 .sort_index()
             )
@@ -1080,7 +1104,7 @@ else:
             )
             cat_counts = (
                 final_df[cat_for_bar]
-                .value_counts(dropna=False)
+                .value_counts(dropna=True)  # ignore missing categories
                 .head(25)
                 .rename("count")
             )
@@ -1125,8 +1149,8 @@ else:
             color_options = ["(none)"] + list(final_df.columns)
             default_index = 0
             if fs_suggestions:
-                # +1 because of "(none)"
-                default_index = color_options.index(fs_suggestions[0]) if fs_suggestions[0] in color_options else 0
+                if fs_suggestions[0] in color_options:
+                    default_index = color_options.index(fs_suggestions[0])
 
             color_col = st.selectbox(
                 "Indicator for colour shading (e.g., food security index/category)",
@@ -1218,7 +1242,7 @@ else:
             group_cols = [slicer_1] if slicer_2 == "(none)" else [slicer_1, slicer_2]
             grouped = (
                 final_df[group_cols + [target]]
-                .dropna(subset=[target])
+                .dropna(subset=[target])  # ignore missing outcome values
                 .groupby(group_cols)[target]
                 .agg(["count", "mean"])
                 .reset_index()
@@ -1249,6 +1273,7 @@ else:
 st.markdown("---")
 st.caption(
     "Automatic cleaning is applied by default, but you remain in control. "
+    "Missing/NA placeholders are cleaned, and NaN values are ignored in graphs and summaries. "
     "Use the EDA, Visualizations, Slicer, and GPS maps to explore feasibility, "
     "food security gradients (red → green), and risk patterns across regions and countries."
 )
