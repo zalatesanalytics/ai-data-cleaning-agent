@@ -1,6 +1,6 @@
 """
 Zalates Analytics – AI Data Cleaning & Integration Agent
-(Futuristic but readable theme + GPS maps + separate pages for EDA, Visualizations, and Slicers)
+(Futuristic but readable theme + GPS maps + rich visualizations)
 """
 
 import os
@@ -10,7 +10,7 @@ from typing import Dict, List, Tuple
 import numpy as np
 import pandas as pd
 import streamlit as st
-import plotly.express as px  # for nicer geo maps
+import plotly.express as px  # for nicer geo maps & charts
 
 # Optional imports for SPSS
 try:
@@ -715,7 +715,7 @@ st.set_page_config(
     layout="wide",
 )
 
-# Futuristic but readable theme – higher contrast, bigger base font
+# Futuristic but readable theme – higher contrast, larger base font
 st.markdown(
     """
     <style>
@@ -727,7 +727,7 @@ st.markdown(
         font-weight: 600;
     }
     .stApp {
-        background: radial-gradient(circle at 0% 0%, #0f172a 0%, #111827 40%, #020617 100%);
+        background: radial-gradient(circle at 0% 0%, #020617 0%, #020617 40%, #020617 100%);
     }
     .block-container {
         padding-top: 1rem;
@@ -739,29 +739,45 @@ st.markdown(
         margin-top: 1rem;
         margin-bottom: 2rem;
     }
+    /* Sidebar: dark background, light text, no blue-on-white */
     [data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #020617 0%, #111827 40%, #0f766e 100%);
-        color: #e5e7eb;
+        background-color: #020617 !important;
     }
     [data-testid="stSidebar"] * {
         color: #e5e7eb !important;
+    }
+    /* Sidebar inputs & radios */
+    [data-testid="stSidebar"] label {
+        color: #e5e7eb !important;
         font-size: 15px;
     }
+    [data-testid="stSidebar"] .st-bb, 
+    [data-testid="stSidebar"] .st-af {
+        background-color: #0f172a !important;
+        color: #e5e7eb !important;
+    }
     .zalates-header {
-        padding: 1.2rem 1.4rem;
+        padding: 1.0rem 1.2rem;
         border-radius: 1rem;
         background: linear-gradient(135deg, #1d4ed8 0%, #7c3aed 45%, #06b6d4 100%);
         color: #ffffff;
-        margin-bottom: 1rem;
+        margin-bottom: 0.5rem;
+    }
+    .zalates-header h2 {
+        margin-bottom: 0.2rem;
+    }
+    .zalates-header p {
+        margin-top: 0.1rem;
+        margin-bottom: 0;
     }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-# Header with logo + title
+# Header with logo + title (better aligned)
 logo_path = "logo-png-circle2.png"  # ensure this file is in the repo root
-col_logo, col_title = st.columns([1, 4])
+col_logo, col_title = st.columns([1, 5])
 with col_logo:
     if os.path.exists(logo_path):
         st.image(logo_path, use_column_width=True)
@@ -769,7 +785,7 @@ with col_title:
     st.markdown(
         '<div class="zalates-header">'
         '<h2>🧹 Zalates Analytics – AI Data-Cleaning, Integration & Risk Dashboards</h2>'
-        '<p style="margin-bottom:0;">Clean, harmonize, and analyze data for feasibility, food security, and business risk decisions.</p>'
+        '<p>Clean, harmonize, and analyze data for feasibility, food security, and business risk decisions.</p>'
         '</div>',
         unsafe_allow_html=True,
     )
@@ -1077,42 +1093,98 @@ else:
     elif page == "Visualizations":
         st.subheader("📊 Visualizations")
 
-        # Numeric histogram-like chart
-        st.markdown("### Numeric distributions")
+        # --- Numeric visualizations: histogram + line chart ---
+        st.markdown("### Numeric variables (histogram & line chart)")
         if numeric_cols_all:
-            num_for_hist = st.selectbox(
-                "Choose numeric variable for distribution plot",
+            num_var = st.selectbox(
+                "Choose numeric variable",
                 numeric_cols_all,
                 key="viz_num",
             )
-            st.bar_chart(
-                final_df[num_for_hist]
-                .dropna()  # ignore missing values
-                .value_counts()
-                .sort_index()
-            )
+            numeric_series = final_df[num_var].dropna()  # ignore missing values
+
+            if not numeric_series.empty:
+                col_hist, col_line = st.columns(2)
+
+                with col_hist:
+                    st.markdown("**Histogram**")
+                    fig_hist = px.histogram(
+                        numeric_series,
+                        nbins=30,
+                        labels={"value": num_var},
+                        title=f"Distribution of {num_var}",
+                    )
+                    st.plotly_chart(fig_hist, use_container_width=True)
+
+                with col_line:
+                    st.markdown("**Line plot (sorted values)**")
+                    sorted_series = numeric_series.sort_values().reset_index(drop=True)
+                    fig_line = px.line(
+                        sorted_series,
+                        labels={"index": "sorted index", "value": num_var},
+                        title=f"Sorted values of {num_var}",
+                    )
+                    st.plotly_chart(fig_line, use_container_width=True)
+            else:
+                st.info("Selected numeric variable has only missing values.")
         else:
             st.info("No numeric variables available for plotting.")
 
-        # Categorical bar chart
-        st.markdown("### Categorical distributions")
+        # --- Categorical visualizations: bar (vertical/horizontal) + pie ---
+        st.markdown("### Categorical variables (bar & pie charts)")
         if cat_cols_all:
-            cat_for_bar = st.selectbox(
+            cat_var = st.selectbox(
                 "Choose categorical variable",
                 cat_cols_all,
                 key="viz_cat",
             )
             cat_counts = (
-                final_df[cat_for_bar]
+                final_df[cat_var]
                 .value_counts(dropna=True)  # ignore missing categories
-                .head(25)
-                .rename("count")
+                .head(15)
             )
-            st.bar_chart(cat_counts)
+
+            if not cat_counts.empty:
+                cat_df = cat_counts.reset_index()
+                cat_df.columns = [cat_var, "count"]
+
+                col_bar_v, col_bar_h = st.columns(2)
+
+                with col_bar_v:
+                    st.markdown("**Vertical bar chart**")
+                    fig_bar_v = px.bar(
+                        cat_df,
+                        x=cat_var,
+                        y="count",
+                        title=f"{cat_var}: counts (top 15)",
+                    )
+                    st.plotly_chart(fig_bar_v, use_container_width=True)
+
+                with col_bar_h:
+                    st.markdown("**Horizontal bar chart**")
+                    fig_bar_h = px.bar(
+                        cat_df,
+                        x="count",
+                        y=cat_var,
+                        orientation="h",
+                        title=f"{cat_var}: counts (horizontal)",
+                    )
+                    st.plotly_chart(fig_bar_h, use_container_width=True)
+
+                st.markdown("**Pie chart**")
+                fig_pie = px.pie(
+                    cat_df,
+                    names=cat_var,
+                    values="count",
+                    title=f"{cat_var}: share of categories",
+                )
+                st.plotly_chart(fig_pie, use_container_width=True)
+            else:
+                st.info("Selected categorical variable has only missing values.")
         else:
             st.info("No categorical variables available for plotting.")
 
-        # Map (if lat/lon exist)
+        # --- Map (if lat/lon exist) ---
         st.markdown("### GPS / Country Map (if latitude & longitude available)")
 
         lat_cols = [c for c in final_df.columns if "lat" in c.lower()]
@@ -1148,9 +1220,8 @@ else:
             ]
             color_options = ["(none)"] + list(final_df.columns)
             default_index = 0
-            if fs_suggestions:
-                if fs_suggestions[0] in color_options:
-                    default_index = color_options.index(fs_suggestions[0])
+            if fs_suggestions and fs_suggestions[0] in color_options:
+                default_index = color_options.index(fs_suggestions[0])
 
             color_col = st.selectbox(
                 "Indicator for colour shading (e.g., food security index/category)",
