@@ -715,17 +715,17 @@ st.set_page_config(
     layout="wide",
 )
 
-# Futuristic but readable theme – higher contrast, larger base font
+# ---- NEW GLOBAL + SIDEBAR THEME (high contrast, readable) ----
 st.markdown(
     """
     <style>
-    html, body, [class*="css"]  {
+    /* Global font */
+    html, body, [class*="css"] {
         font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, "Roboto", sans-serif;
-        font-size: 16px;
+        font-size: 15px;
     }
-    h1, h2, h3 {
-        font-weight: 600;
-    }
+
+    /* Main app background and container */
     .stApp {
         background: radial-gradient(circle at 0% 0%, #020617 0%, #020617 40%, #020617 100%);
     }
@@ -739,23 +739,84 @@ st.markdown(
         margin-top: 1rem;
         margin-bottom: 2rem;
     }
-    /* Sidebar: dark background, light text, no blue-on-white */
+
+    /* --------------------------
+       SIDEBAR CONTAINER
+    ---------------------------*/
     [data-testid="stSidebar"] {
-        background-color: #020617 !important;
+        background-color: #0b1220 !important;
+        padding: 1.2rem 1rem !important;
+        color: #f5f7fa !important;
     }
+    /* Sidebar text */
     [data-testid="stSidebar"] * {
-        color: #e5e7eb !important;
+        color: #f5f7fa !important;
     }
-    /* Sidebar inputs & radios */
+    /* Sidebar headers & labels */
+    [data-testid="stSidebar"] h2,
+    [data-testid="stSidebar"] h3,
     [data-testid="stSidebar"] label {
-        color: #e5e7eb !important;
+        color: #ffffff !important;
+        font-weight: 600 !important;
         font-size: 15px;
     }
-    [data-testid="stSidebar"] .st-bb, 
-    [data-testid="stSidebar"] .st-af {
-        background-color: #0f172a !important;
-        color: #e5e7eb !important;
+
+    /* --------------------------
+       SIDEBAR INPUT ELEMENTS
+    ---------------------------*/
+    /* General input backgrounds (selects, text, etc.) */
+    [data-testid="stSidebar"] .st-bb,
+    [data-testid="stSidebar"] .st-af,
+    [data-testid="stSidebar"] .st-bg,
+    [data-testid="stFileUploadDropzone"] {
+        background-color: #1c2537 !important;
+        border-radius: 8px !important;
+        border: 1px solid #2d3a50 !important;
+        color: #e8ecf1 !important;
     }
+
+    /* File uploader text */
+    [data-testid="stFileUploadDropzone"] * {
+        color: #dfe6ee !important;
+        font-size: 13px;
+    }
+
+    /* Radio & checkbox labels */
+    .stRadio label, .stCheckbox label {
+        color: #ffffff !important;
+        font-size: 15px;
+    }
+
+    /* Radio marker */
+    .stRadio > div > label > div:first-child {
+        border: 2px solid #94a3b8 !important;
+    }
+    .stRadio > div > label > div:first-child div {
+        background-color: #38bdf8 !important; /* cyan selection */
+    }
+
+    /* Checkbox marker */
+    .stCheckbox > div > label > div:first-child {
+        background-color: #1c2537 !important;
+        border: 2px solid #94a3b8 !important;
+    }
+    .stCheckbox > div > label > div:first-child svg {
+        stroke: #38bdf8 !important;
+    }
+
+    /* Spacing in sidebar */
+    [data-testid="stSidebar"] section {
+        margin-bottom: 1.5rem !important;
+    }
+    [data-testid="stSidebar"] .stFileUploader {
+        margin-top: 0.5rem !important;
+    }
+    [data-testid="stSidebar"] p {
+        color: #cdd5e0 !important;
+        font-size: 13px;
+    }
+
+    /* Header card */
     .zalates-header {
         padding: 1.0rem 1.2rem;
         border-radius: 1rem;
