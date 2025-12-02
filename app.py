@@ -1430,4 +1430,4 @@ st.caption(
     "Use the EDA, Visualizations, Slicer, and GPS maps to explore feasibility, "
     "food security gradients (red → green), and risk patterns across regions and countries."
 )
- "
+"
