@@ -743,11 +743,72 @@ st.markdown(
     /* --------------------------
        SIDEBAR CONTAINER
     ---------------------------*/
-    [data-testid="stSidebar"] {
-        background-color: #0b1220 !important;
-        padding: 1.2rem 1rem !important;
-        color: #f5f7fa !important;
-    }
+       /* ------------------------------
+   FULL DARK SIDEBAR (no white)
+------------------------------*/
+[data-testid="stSidebar"] {
+    background-color: #0b1220 !important;
+    padding: 1.2rem 1rem !important;
+}
+
+/* Remove all white/gray from inner elements */
+[data-testid="stSidebar"] * {
+    background-color: transparent !important;
+    color: #e8ecf1 !important;
+}
+
+/* Sidebar text */
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3,
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] p {
+    color: #ffffff !important;
+    background-color: transparent !important;
+}
+
+/* Inputs (dropdowns, text inputs, radios, checkboxes) */
+[data-testid="stSidebar"] .st-bb,
+[data-testid="stSidebar"] .st-af,
+[data-testid="stSidebar"] .st-bg,
+[data-testid="stSidebar"] .st-c8,
+[data-testid="stSidebar"] .st-ci,
+[data-testid="stSidebar"] input,
+[data-testid="stSidebar"] select,
+[data-testid="stSidebar"] textarea {
+    background-color: #1c2537 !important;
+    border: 1px solid #2d3a50 !important;
+    color: #e8ecf1 !important;
+    border-radius: 8px !important;
+}
+
+/* File upload area */
+[data-testid="stFileUploadDropzone"] {
+    background-color: #1c2537 !important;
+    border: 2px dashed #334155 !important;
+}
+[data-testid="stFileUploadDropzone"] * {
+    background-color: transparent !important;
+    color: #dfe6ee !important;
+}
+
+/* Radio buttons */
+.stRadio > div > label > div:first-child {
+    background-color: #1c2537 !important;
+    border: 2px solid #94a3b8 !important;
+}
+.stRadio > div > label > div:first-child div {
+    background-color: #38bdf8 !important;
+}
+
+/* Checkbox styling */
+.stCheckbox > div > label > div:first-child {
+    background-color: #1c2537 !important;
+    border: 2px solid #94a3b8 !important;
+}
+.stCheckbox > div > label > div:first-child svg {
+    stroke: #38bdf8 !important;
+}
+ 
     /* Sidebar text */
     [data-testid="stSidebar"] * {
         color: #f5f7fa !important;
