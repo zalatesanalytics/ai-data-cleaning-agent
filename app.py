@@ -1,6 +1,8 @@
-# streamlit_app.py (or app.py)
+# app.py / streamlit_app.py
 
 import io
+import textwrap
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -410,6 +412,128 @@ def create_dummy_integrated(n=500):
         df, food_group_cols=[f"wdds_fg{i}" for i in range(1, 10)], score_col="wdds", max_score=9
     )
     return df
+
+# ==================================================
+# PROGRAM / POLICY-LEVEL NARRATIVE HELPER
+# ==================================================
+def build_program_narrative(df, dataset_label):
+    """
+    Build a program/policy-level narrative based on HFIAS, HDDS/WDDS and youth indicators.
+    Returns markdown text you can display on screen and embed into the PDF.
+    """
+    name = dataset_label or "Current dataset"
+    total_n = len(df)
+
+    lines = []
+    lines.append(
+        f"**Interpretation for this dataset (program/policy level)**  \n"
+        f"_Dataset: **{name}**, Records: **{total_n:,}**_"
+    )
+
+    # ---------- HFIAS ----------
+    if "hfias_score" in df.columns:
+        hf_mean = df["hfias_score"].mean()
+        hf_mean = float(hf_mean) if pd.notna(hf_mean) else 0.0
+
+        if "hfias_category" in df.columns:
+            cat_counts = df["hfias_category"].value_counts(dropna=False)
+            cat_pct = (cat_counts / cat_counts.sum() * 100).round(1)
+            severe_pct = float(cat_pct.get("Severely food insecure", 0.0))
+            mod_pct = float(cat_pct.get("Moderately food insecure", 0.0))
+            mild_pct = float(cat_pct.get("Mildly food insecure", 0.0))
+            secure_pct = float(cat_pct.get("Food secure", 0.0))
+        else:
+            severe_pct = mod_pct = mild_pct = secure_pct = 0.0
+
+        lines.append(
+            f"- Household food insecurity (HFIAS) shows an average score of **{hf_mean:.1f}**. "
+            f"Approximately **{severe_pct:.1f}%** of households are *severely food insecure*, "
+            f"and **{mod_pct:.1f}%** are *moderately food insecure*, compared to "
+            f"**{secure_pct:.1f}%** who are classified as *food secure*. This signals "
+            f"substantial vulnerability that requires targeted safety nets and livelihood support."
+        )
+
+    # ---------- HDDS ----------
+    if "hdds" in df.columns:
+        hdds_mean = float(df["hdds"].mean())
+        if "region" in df.columns:
+            reg_hdds = df.groupby("region")["hdds"].mean().sort_values(ascending=False)
+            if len(reg_hdds) > 0:
+                top_region = str(reg_hdds.index[0])
+                top_val = float(reg_hdds.iloc[0])
+                lines.append(
+                    f"- Household dietary diversity (HDDS) averages **{hdds_mean:.1f} food groups** in the last 24 hours. "
+                    f"Regions such as **{top_region}** reach up to **{top_val:.1f} groups**, while others lag behind, "
+                    f"highlighting geographic inequities in access to diverse diets."
+                )
+        else:
+            lines.append(
+                f"- Household dietary diversity (HDDS) averages **{hdds_mean:.1f} food groups** in the last 24 hours. "
+                f"Scores below 5–6 food groups suggest limited access to nutrient-dense foods among many households."
+            )
+
+    # ---------- WDDS ----------
+    if "wdds" in df.columns:
+        wdds_mean = float(df["wdds"].mean())
+        wdds_hi = (df["wdds"] >= 5).mean() * 100
+        lines.append(
+            f"- Women’s dietary diversity (WDDS) averages **{wdds_mean:.1f} food groups**. "
+            f"Only about **{wdds_hi:.1f}%** of women achieve a WDDS ≥ 5 food groups, indicating gaps in access to "
+            f"micronutrient-dense foods and a need for nutrition-sensitive agriculture, markets, and SBCC."
+        )
+
+    # ---------- Youth ----------
+    youth_cols = [
+        "decision_power_score",
+        "agency_score",
+        "hope_future_score",
+        "financial_literacy_score",
+        "empathy_score",
+        "participation_score",
+    ]
+    present_youth_cols = [c for c in youth_cols if c in df.columns]
+
+    if present_youth_cols:
+        means = df[present_youth_cols].mean().round(2).to_dict()
+        decision = means.get("decision_power_score")
+        agency = means.get("agency_score")
+        hope = means.get("hope_future_score")
+        fin = means.get("financial_literacy_score")
+
+        summary_bits = []
+        if decision is not None and not np.isnan(decision):
+            summary_bits.append(f"decision-making power ≈ **{float(decision):.1f}/5**")
+        if agency is not None and not np.isnan(agency):
+            summary_bits.append(f"agency ≈ **{float(agency):.1f}/5**")
+        if hope is not None and not np.isnan(hope):
+            summary_bits.append(f"hope for the future ≈ **{float(hope):.1f}/5**")
+        if fin is not None and not np.isnan(fin):
+            summary_bits.append(f"financial literacy ≈ **{float(fin):.1f}/5**")
+
+        if summary_bits:
+            bits_str = ", ".join(summary_bits)
+            lines.append(
+                f"- Among youth, core empowerment indicators such as {bits_str} suggest mixed but improvable levels "
+                f"of agency and economic readiness. Programs that blend life-skills coaching, mentorship, and practical "
+                f"financial education could yield sizeable gains in youth pathways to decent work."
+            )
+
+        if "received_training" in df.columns:
+            trained_pct = (df["received_training"] == 1).mean() * 100
+            lines.append(
+                f"- Only **{trained_pct:.1f}%** of youth are flagged as having received structured training. "
+                f"This indicates strong scope for scaling cohort-based youth programs that intentionally target "
+                f"those with lower decision power and financial literacy scores."
+            )
+
+    # ---------- Responsible AI framing ----------
+    lines.append(
+        "- These insights are derived from **aggregated household and youth data**; the assistant does **not** profile "
+        "or score individuals. It is designed as a **responsible AI decision-support tool** to inform program and "
+        "policy adjustments (e.g., targeting, coverage, and service mix), not individual-level eligibility decisions."
+    )
+
+    return "\n\n".join(lines)
 
 # ==================================================
 # SIDEBAR: DATA SOURCE
@@ -1147,12 +1271,20 @@ with tab_ai:
         '<div class="section-title">AI NARRATIVE REPORT & EXPORTS</div>',
         unsafe_allow_html=True,
     )
-    st.markdown("##### AI Narrative Report")
+
+    # ---------- Data-driven program/policy narrative (no OpenAI required) ----------
+    st.markdown("##### Program-/Policy-level Interpretation (Data-driven)")
+
+    program_narrative = build_program_narrative(df, dataset_label)
+    st.markdown(program_narrative)
+
+    st.markdown("---")
+    st.markdown("##### AI Narrative Report (optional, using OpenAI)")
 
     if (not openai_available) or (not openai.api_key):
         st.warning(
             "OpenAI is not fully available. Install the `openai` package and "
-            "set `OPENAI_API_KEY` in Streamlit secrets to enable the narrative report."
+            "set `OPENAI_API_KEY` in Streamlit secrets to enable the AI-generated narrative."
         )
     else:
         user_prompt = st.text_area(
@@ -1164,6 +1296,7 @@ with tab_ai:
                 "Highlight any gender or regional differences and potential program implications."
             ),
         )
+
         if st.button("Generate AI Narrative"):
             context_sample = df.head(10).to_dict()
             combined_narrative = (
@@ -1193,6 +1326,7 @@ with tab_ai:
     st.markdown("---")
     st.markdown("##### Downloads")
 
+    # CSV Download
     csv_bytes = df.to_csv(index=False).encode("utf-8")
     st.download_button(
         "⬇️ Download current dataset as CSV",
@@ -1201,8 +1335,44 @@ with tab_ai:
         mime="text/csv",
     )
 
+    # PDF: narrative + charts
     pdf_buffer = io.BytesIO()
     with PdfPages(pdf_buffer) as pdf:
+        # Page 1: narrative text (program-level)
+        try:
+            fig_text = plt.figure(figsize=(8.27, 11.69))  # A4-ish
+            fig_text.subplots_adjust(left=0.05, right=0.95, top=0.9, bottom=0.05)
+
+            title = "Program-level Interpretation – Food Security, Nutrition & Youth"
+            fig_text.text(
+                0.5, 0.95, title, ha="center", va="top", fontsize=14, weight="bold"
+            )
+
+            # Strip markdown for PDF and wrap text
+            plain = program_narrative.replace("**", "").replace("_", "")
+            lines = plain.split("\n")
+            y = 0.9
+            dy = 0.03
+            for line in lines:
+                if not line.strip():
+                    y -= dy / 2
+                    continue
+                wrapped = textwrap.wrap(line, width=95)
+                for wline in wrapped:
+                    fig_text.text(0.03, y, wline, ha="left", va="top", fontsize=9)
+                    y -= dy
+                    if y < 0.05:
+                        break
+                if y < 0.05:
+                    break
+
+            pdf.savefig(fig_text)
+            plt.close(fig_text)
+        except Exception:
+            # If narrative rendering fails, just skip the text page and continue with charts
+            pass
+
+        # Additional pages: numeric histograms
         for col in numeric_cols[:12]:
             fig, ax = plt.subplots()
             ax.hist(df[col].dropna(), bins=12)
@@ -1211,11 +1381,12 @@ with tab_ai:
             ax.set_ylabel("Frequency")
             pdf.savefig(fig)
             plt.close(fig)
+
     pdf_buffer.seek(0)
 
     st.download_button(
-        "⬇️ Download basic PDF chart report",
+        "⬇️ Download PDF report (narrative + charts)",
         data=pdf_buffer,
-        file_name="basic_report.pdf",
+        file_name="analysis_report.pdf",
         mime="application/pdf",
     )
