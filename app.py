@@ -1445,17 +1445,39 @@ else:
             st.markdown("**Grouped summary table**")
             st.dataframe(grouped)
 
-            st.markdown("**Visualization of mean by slicer(s)**")
-            if slicer_2 == "(none)":
-                chart_df = grouped.set_index(slicer_1)[f"{target}_mean"]
-                st.bar_chart(chart_df)
-            else:
-                pivot = grouped.pivot(
-                    index=slicer_1,
-                    columns=slicer_2,
-                    values=f"{target}_mean",
-                )
-                st.bar_chart(pivot)
+st.markdown("**Visualization of mean by slicer(s) (vertical bars)**")
+
+if slicer_2 == "(none)":
+    # One slicer → simple vertical bar chart
+    fig_mean = px.bar(
+        grouped,
+        x=slicer_1,
+        y=f"{target}_mean",
+        title=f"Mean {target} by {slicer_1}",
+        labels={
+            slicer_1: slicer_1,
+            f"{target}_mean": f"Mean {target}",
+        },
+    )
+    st.plotly_chart(fig_mean, use_container_width=True)
+
+else:
+    # Two slicers → grouped vertical bar chart
+    fig_mean = px.bar(
+        grouped,
+        x=slicer_1,
+        y=f"{target}_mean",
+        color=slicer_2,
+        barmode="group",
+        title=f"Mean {target} by {slicer_1} and {slicer_2}",
+        labels={
+            slicer_1: slicer_1,
+            slicer_2: slicer_2,
+            f"{target}_mean": f"Mean {target}",
+        },
+    )
+    st.plotly_chart(fig_mean, use_container_width=True)
+
 
     # ===== Page 4: Narrative summary =====
     elif page == "Narrative summary":
